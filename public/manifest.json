@@ -1,0 +1,34 @@
+{
+  "short_name": "خبزة",
+  "name": "تطبيق خبزة الذكي - Khobza App",
+  "id": "/",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "type": "image/png",
+      "sizes": "180x180",
+      "purpose": "any"
+    }
+  ],
+  "start_url": "/",
+  "scope": "/",
+  "background_color": "#1c1917",
+  "theme_color": "#d97706",
+  "display": "standalone",
+  "orientation": "portrait",
+  "lang": "ar",
+  "dir": "rtl",
+  "description": "تطبيق خبزة الذكي الموحد لإدارة طلبات الخبز وتوصيل المندوبين وتجديد اشتراكات العوائل"
+}

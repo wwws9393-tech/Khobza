@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --sat: env(safe-area-inset-top, 0px);
+    --sab: env(safe-area-inset-bottom, 0px);
+    --sal: env(safe-area-inset-left, 0px);
+    --sar: env(safe-area-inset-right, 0px);
+  }
+
+  /* Native device touch behavior */
+  html, body {
+    padding-top: var(--sat);
+    padding-bottom: var(--sab);
+    padding-left: var(--sal);
+    padding-right: var(--sar);
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    overscroll-behavior-y: none;
+    min-height: 100vh;
+    min-height: -webkit-fill-available;
+  }
+
+  /* Ensure inputs are fully selectable and editable on iOS Safari */
+  input, textarea, select, [contenteditable="true"] {
+    user-select: text !important;
+    -webkit-user-select: text !important;
+  }
+}
+
+/* Device safe area utilities */
+.safe-pt {
+  padding-top: max(1rem, env(safe-area-inset-top));
+}
+
+.safe-pb {
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
+
+.safe-mb {
+  margin-bottom: env(safe-area-inset-bottom);
+}
+
+/* iOS WebKit Backdrop Blur Support */
+.backdrop-blur-md, .backdrop-blur-sm, .backdrop-blur-xs, .backdrop-blur-lg, .backdrop-blur-2xl {
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* Custom scrollbar for mobile native feel */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(217, 119, 6, 0.3);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(217, 119, 6, 0.6);
+}
+
+/* Pulsing animated glowing border */
+@keyframes glowPulse {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(245, 158, 11, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(245, 158, 11, 0.8);
+  }
+}
+
+.animate-glow-pulse {
+  animation: glowPulse 2.5s infinite ease-in-out;
+}
+

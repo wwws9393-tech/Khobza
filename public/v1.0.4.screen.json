@@ -1,0 +1,28 @@
+{
+  "restorePointName": "v1.0.4.screen",
+  "appName": "Khobza Official Restore Point",
+  "version": "1.0.4",
+  "createdAt": "2026-08-12T00:00:00.000Z",
+  "status": "stable",
+  "description": "نقطة استعادة رسمية ومستقرة لنظام الخبزة v1.0.4.screen",
+  "families": [],
+  "mandoubs": [],
+  "admins": [
+    {
+      "id": "admin-1",
+      "username": "admin123",
+      "password": "admin123",
+      "fullName": "المدير العام (الأدمن الرئيس)"
+    }
+  ],
+  "orders": [],
+  "renewals": [],
+  "blockedPhones": [],
+  "versionConfig": {
+    "currentVersion": "1.0.4",
+    "latestVersion": "1.0.4",
+    "isMandatory": false,
+    "releaseNotes": "الإصدار الرسمي المستقر v1.0.4.screen - تم تحديث واستقرار نظام إدارة الخبزة وتصفيات الحسابات واللوحة الذكية",
+    "releasedAt": "2026-08-12T00:00:00.000Z"
+  }
+}

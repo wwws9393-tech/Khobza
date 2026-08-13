@@ -1,0 +1,10 @@
+{
+  "name": "خبزة Khobza - v1.0.0",
+  "description": "تطبيق خبزة الإلكتروني - الإصدار المعتمد v1.0.0 لإدارة طلبات الخبز اليومية واشتراكات العوائل وإشعار المندوبين مع التنبيهات الجغرافية والنظامية",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
