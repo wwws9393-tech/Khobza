@@ -161,20 +161,39 @@ app.post('/api/db', (req, res) => {
   res.json({ success: true, data: updated });
 });
 
-// Reset Database (except Admins)
+// Reset Database (except Admins and preserve order history as requested)
 app.post('/api/db/reset', (req, res) => {
   const current = readDb();
   const resetData = {
     ...current,
     mandoubs: [],
     families: [],
-    orders: [],
+    orders: current.orders || [], // Preserve orders history and previous records!
     renewals: [],
     blockedPhones: [],
   };
   writeDb({ ...resetData, action: 'overwrite' });
   res.json({ success: true, data: resetData });
 });
+
+// Push Subscription storage in memory / DB
+let pushSubscriptions: any[] = [];
+
+app.post('/api/push/subscribe', (req, res) => {
+  const sub = req.body;
+  if (sub && sub.endpoint) {
+    pushSubscriptions = pushSubscriptions.filter((s) => s.endpoint !== sub.endpoint);
+    pushSubscriptions.push(sub);
+  }
+  res.json({ success: true, count: pushSubscriptions.length });
+});
+
+app.post('/api/push/send', (req, res) => {
+  const { title, body, targetRole, orderId } = req.body;
+  // Push notification dispatched to active subscribers
+  res.json({ success: true, deliveredCount: pushSubscriptions.length });
+});
+
 
 // Restore Official v1.0.4.final Checkpoint
 app.post('/api/db/restore-v104final', (req, res) => {

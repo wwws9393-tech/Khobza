@@ -1,4 +1,4 @@
-const CACHE_NAME = 'khobza-pwa-cache-v11';
+const CACHE_NAME = 'khobza-pwa-cache-v12';
 const urlsToCache = [
   '/',
   '/index.html',
@@ -71,9 +71,52 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Handle clicking on system notification tray item
+// ==============================================================================
+// 1. Web Push Event Listener: Wakes up phone even when app is COMPLETELY CLOSED
+// ==============================================================================
+self.addEventListener('push', (event) => {
+  let title = 'تطبيق الخبزة الذكي 🥖';
+  let body = 'لديك إشعار جديد من تطبيق الخبزة';
+  let options = {
+    icon: '/icon-192.png',
+    badge: '/favicon.png',
+    vibrate: [500, 200, 500, 200, 500, 200, 800],
+    renotify: true,
+    requireInteraction: true,
+    data: {
+      url: '/',
+      timestamp: Date.now(),
+    },
+    actions: [
+      { action: 'open_app', title: 'فتح التطبيق' },
+      { action: 'close', title: 'إغلاق' },
+    ],
+  };
+
+  if (event.data) {
+    try {
+      const payload = event.data.json();
+      if (payload.title) title = payload.title;
+      if (payload.body) body = payload.body;
+      if (payload.data) options.data = { ...options.data, ...payload.data };
+      if (payload.tag) options.tag = payload.tag;
+    } catch (e) {
+      body = event.data.text() || body;
+    }
+  }
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+// ==============================================================================
+// 2. Notification Click Handler: Opens app or brings it to foreground
+// ==============================================================================
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+
+  if (event.action === 'close') {
+    return;
+  }
 
   const data = event.notification.data || {};
   const targetUrl = new URL(data.url || '/', self.location.origin);
@@ -98,7 +141,9 @@ self.addEventListener('notificationclick', (event) => {
   );
 });
 
-// Handle incoming background messages
+// ==============================================================================
+// 3. Message Event Listener (from active tabs or client scripts)
+// ==============================================================================
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
@@ -121,5 +166,3 @@ self.addEventListener('message', (event) => {
     });
   }
 });
-
-

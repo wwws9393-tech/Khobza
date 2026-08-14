@@ -10,7 +10,9 @@ import {
   updateOrderStatus,
 } from '../services/storage';
 import { requestNotificationPermission, sendBrowserNotification } from '../services/notifications';
+import { registerPushSubscription } from '../services/pushService';
 import { LocationPickerModal } from './LocationPickerModal';
+
 import {
   Truck,
   Phone,
@@ -130,9 +132,13 @@ export const MandoubView: React.FC<Props> = ({ mandoub, onLogout }) => {
 
   useEffect(() => {
     requestNotificationPermission();
+    if (mandoub?.phone) {
+      registerPushSubscription(mandoub.phone, 'mandoub', mandoub.vlanCode).catch(() => {});
+    }
     loadData();
     handleShareGps();
     const handleStorageChange = () => loadData();
+
     window.addEventListener('khobza_data_change', handleStorageChange);
     window.addEventListener('storage', handleStorageChange);
 

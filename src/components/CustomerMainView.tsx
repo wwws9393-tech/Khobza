@@ -10,6 +10,8 @@ import {
   pushToServer,
 } from '../services/storage';
 import { sendBrowserNotification } from '../services/notifications';
+import { registerPushSubscription } from '../services/pushService';
+
 import {
   Calendar,
   Clock,
@@ -293,9 +295,24 @@ export const CustomerMainView: React.FC<Props> = ({
 
   const handleConfirmArrival = (orderId: string) => {
     confirmOrderReceipt(orderId);
+    setCustomerOrders((prev) =>
+      prev.map((o) =>
+        o.id === orderId
+          ? {
+              ...o,
+              status: 'completed_confirmed',
+              customerConfirmedAt: new Date().toISOString(),
+            }
+          : o
+      )
+    );
+    setOrderSuccessMessage('تم تأكيد وصول واستلام طلب الخبز بنجاح! بالعافية 🥖');
     pushToServer('overwrite');
-    loadOrders();
+    setTimeout(() => {
+      loadOrders();
+    }, 100);
   };
+
 
   const handleConfirmRenewal = (e: React.FormEvent) => {
     e.preventDefault();

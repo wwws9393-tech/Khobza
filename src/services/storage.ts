@@ -22,6 +22,12 @@ import {
   INITIAL_ORDERS,
 } from '../data/initialSeed';
 import { sendBrowserNotification } from './notifications';
+import {
+  isSupabaseConfigured,
+  fetchAllFromSupabase,
+  pushAllToSupabase,
+} from './supabase';
+import { broadcastExternalPush } from './pushService';
 
 const KEYS = {
   FAMILIES: 'khobza_families_v2',
@@ -94,15 +100,29 @@ let lastMutationTime = 0;
 export async function pushToServer(action: 'merge' | 'overwrite' = 'overwrite'): Promise<void> {
   try {
     lastMutationTime = Date.now();
+    const families = getStorage(KEYS.FAMILIES, INITIAL_FAMILIES);
+    const mandoubs = getStorage(KEYS.MANDOUBS, INITIAL_MANDOUBS);
+    const admins = getStorage(KEYS.ADMINS, INITIAL_ADMINS);
+    const orders = getStorage(KEYS.ORDERS, INITIAL_ORDERS);
+    const renewals = getStorage(KEYS.RENEWALS, []);
+    const blockedPhones = getStorage(KEYS.BLOCKED_PHONES, INITIAL_BLOCKED_PHONES);
+
     const payload = {
       action,
-      families: getStorage(KEYS.FAMILIES, INITIAL_FAMILIES),
-      mandoubs: getStorage(KEYS.MANDOUBS, INITIAL_MANDOUBS),
-      admins: getStorage(KEYS.ADMINS, INITIAL_ADMINS),
-      orders: getStorage(KEYS.ORDERS, INITIAL_ORDERS),
-      renewals: getStorage(KEYS.RENEWALS, []),
-      blockedPhones: getStorage(KEYS.BLOCKED_PHONES, INITIAL_BLOCKED_PHONES),
+      families,
+      mandoubs,
+      admins,
+      orders,
+      renewals,
+      blockedPhones,
     };
+
+    // 1. Push to Supabase if configured
+    if (isSupabaseConfigured()) {
+      pushAllToSupabase({ families, mandoubs, admins, orders, renewals, blockedPhones }).catch(() => {});
+    }
+
+    // 2. Push to local Express DB
     await fetch('/api/db', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -121,13 +141,66 @@ export async function syncWithServer(): Promise<void> {
   }
 
   try {
+    // Check Supabase first if configured
+    if (isSupabaseConfigured()) {
+      const supaData = await fetchAllFromSupabase();
+      if (supaData) {
+        let changed = false;
+        if (supaData.families) {
+          localStorage.setItem(KEYS.FAMILIES, JSON.stringify(supaData.families));
+          changed = true;
+        }
+        if (supaData.mandoubs) {
+          localStorage.setItem(KEYS.MANDOUBS, JSON.stringify(supaData.mandoubs));
+          changed = true;
+        }
+        if (supaData.orders) {
+          localStorage.setItem(KEYS.ORDERS, JSON.stringify(supaData.orders));
+          changed = true;
+        }
+        if (supaData.renewals) {
+          localStorage.setItem(KEYS.RENEWALS, JSON.stringify(supaData.renewals));
+          changed = true;
+        }
+        if (supaData.admins && supaData.admins.length > 0) {
+          localStorage.setItem(KEYS.ADMINS, JSON.stringify(supaData.admins));
+          changed = true;
+        }
+        if (supaData.blockedPhones) {
+          localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify(supaData.blockedPhones));
+          changed = true;
+        }
+        if (changed) {
+          window.dispatchEvent(new Event('khobza_data_change'));
+        }
+        return;
+      }
+    }
+
+    // Sync with local backend
     const res = await fetch('/api/db');
     if (!res.ok) return;
     const data = await res.json();
     if (data && typeof data === 'object') {
       let changed = false;
 
-      // Sync families directly from server source of truth
+      // Smart anti-wipe protection:
+      // If server has empty families/mandoubs, but local storage has active data,
+      // DO NOT wipe local data; heal server instead!
+      const localFamilies = getStorage<Family[]>(KEYS.FAMILIES, []);
+      const localMandoubs = getStorage<Mandoub[]>(KEYS.MANDOUBS, []);
+      const localOrders = getStorage<Order[]>(KEYS.ORDERS, []);
+
+      const serverFamiliesEmpty = !data.families || data.families.length === 0;
+      const serverMandoubsEmpty = !data.mandoubs || data.mandoubs.length === 0;
+
+      if ((serverFamiliesEmpty && localFamilies.length > 0) || (serverMandoubsEmpty && localMandoubs.length > 0)) {
+        // Heal server with existing local data
+        pushToServer('overwrite');
+        return;
+      }
+
+      // Sync families
       if (Array.isArray(data.families)) {
         const serverStr = JSON.stringify(data.families);
         if (serverStr !== localStorage.getItem(KEYS.FAMILIES)) {
@@ -136,7 +209,7 @@ export async function syncWithServer(): Promise<void> {
         }
       }
 
-      // Sync mandoubs directly from server source of truth
+      // Sync mandoubs
       if (Array.isArray(data.mandoubs)) {
         const serverStr = JSON.stringify(data.mandoubs);
         if (serverStr !== localStorage.getItem(KEYS.MANDOUBS)) {
@@ -145,7 +218,7 @@ export async function syncWithServer(): Promise<void> {
         }
       }
 
-      // Sync admins directly from server source of truth
+      // Sync admins
       if (Array.isArray(data.admins) && data.admins.length > 0) {
         const serverStr = JSON.stringify(data.admins);
         if (serverStr !== localStorage.getItem(KEYS.ADMINS)) {
@@ -154,9 +227,8 @@ export async function syncWithServer(): Promise<void> {
         }
       }
 
-      // Sync orders - with smart merging for status updates
+      // Sync orders
       if (Array.isArray(data.orders)) {
-        const localOrders = getStorage<Order[]>(KEYS.ORDERS, []);
         const mergedOrders = mergeArraysById(localOrders, data.orders);
         const mergedStr = JSON.stringify(mergedOrders);
         if (mergedStr !== localStorage.getItem(KEYS.ORDERS)) {
@@ -165,7 +237,7 @@ export async function syncWithServer(): Promise<void> {
         }
       }
 
-      // Sync renewals directly from server source of truth
+      // Sync renewals
       if (Array.isArray(data.renewals)) {
         const serverStr = JSON.stringify(data.renewals);
         if (serverStr !== localStorage.getItem(KEYS.RENEWALS)) {
@@ -233,39 +305,17 @@ export function initializeAppData(): void {
   }
 }
 
-// Reset data except Admins (Admin wipe)
+// Reset data except Admins & preserve orders history as explicitly requested
 export function resetDatabaseExceptAdmins(): void {
+  // Preserve ORDERS history & previous records as explicitly requested!
+  const currentOrders = getStorage<Order[]>(KEYS.ORDERS, []);
+
   localStorage.setItem(KEYS.FAMILIES, JSON.stringify([]));
   localStorage.setItem(KEYS.MANDOUBS, JSON.stringify([]));
-  localStorage.setItem(KEYS.ORDERS, JSON.stringify([]));
   localStorage.setItem(KEYS.RENEWALS, JSON.stringify([]));
   localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify([]));
-
-  // Clean up any temporary or family/order specific keys in localStorage
-  if (typeof window !== 'undefined' && window.localStorage) {
-    const keysToRemove: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (
-        key &&
-        key.startsWith('khobza_') &&
-        key !== KEYS.ADMINS &&
-        key !== KEYS.SESSION &&
-        key !== 'khobza_version_config_v1'
-      ) {
-        if (
-          key !== KEYS.FAMILIES &&
-          key !== KEYS.MANDOUBS &&
-          key !== KEYS.ORDERS &&
-          key !== KEYS.RENEWALS &&
-          key !== KEYS.BLOCKED_PHONES
-        ) {
-          keysToRemove.push(key);
-        }
-      }
-    }
-    keysToRemove.forEach((k) => localStorage.removeItem(k));
-  }
+  // Keep orders records intact!
+  localStorage.setItem(KEYS.ORDERS, JSON.stringify(currentOrders));
 
   pushToServer('overwrite');
 
@@ -275,6 +325,7 @@ export function resetDatabaseExceptAdmins(): void {
 
   window.dispatchEvent(new Event('khobza_data_change'));
 }
+
 
 // Restore Official Stable Checkpoint v1.0.4.final
 export function restoreOfficialPointV104Final(): boolean {
@@ -970,24 +1021,47 @@ export function updateOrderStatus(
             }
           : f
       );
-      setStorage(KEYS.FAMILIES, updatedFamilies);
+      localStorage.setItem(KEYS.FAMILIES, JSON.stringify(updatedFamilies));
     }
   }
 
-  setStorage(KEYS.ORDERS, updatedList);
+  // Atomically update local storage before pushing to prevent race conditions
+  localStorage.setItem(KEYS.ORDERS, JSON.stringify(updatedList));
+  lastMutationTime = Date.now();
+  window.dispatchEvent(new Event('khobza_data_change'));
+  pushToServer('overwrite');
 
   if (updatedOrder) {
     if (newStatus === 'under_review') {
       sendBrowserNotification(
-        'إشعار وصول الخبز 🔔',
-        `وصل المندوب بالطلب ${updatedOrder.id} لعائلة ${updatedOrder.familyName}. يرجى تأكيد الاستلام!`,
-        { orderId: updatedOrder.id, targetRole: 'family' }
+        '🎉 وصل الخبز إلى منزلكم!',
+        `قام المندوب بتوصيل طلب الخبز (${updatedOrder.quantity} ${updatedOrder.unitText}). يرجى تأكيد الاستلام الآن!`,
+        { orderId: updatedOrder.id, targetRole: 'family', force: true }
       );
+      broadcastExternalPush({
+        title: '🎉 وصل الخبز إلى منزلكم!',
+        body: `قام المندوب بتوصيل طلب الخبز (${updatedOrder.quantity} ${updatedOrder.unitText}). يرجى تأكيد الاستلام الآن!`,
+        targetRole: 'family',
+        targetPhone: updatedOrder.familyPhone,
+        orderId: updatedOrder.id,
+      });
+    } else if (newStatus === 'completed_confirmed') {
+      sendBrowserNotification(
+        '✅ تم تأكيد استلام الطلب',
+        `تم تأكيد استلام الطلب (${updatedOrder.quantity} ${updatedOrder.unitText}) بنجاح من قبل العائلة.`,
+        { orderId: updatedOrder.id, targetRole: 'mandoub', force: true }
+      );
+      broadcastExternalPush({
+        title: '✅ تم تأكيد استلام الطلب',
+        body: `تم تأكيد استلام الطلب (${updatedOrder.quantity} ${updatedOrder.unitText}) بنجاح من قبل العائلة.`,
+        targetRole: 'mandoub',
+        orderId: updatedOrder.id,
+      });
     } else if (newStatus === 'processing_unpaid' || newStatus === 'unpaid_confirmed') {
       sendBrowserNotification(
         'تنبيه: طلب غير مسدد ⚠️',
         `تم تسجيل بلاغ عدم تسديد للطلب ${updatedOrder.id} (${updatedOrder.familyName}).`,
-        { orderId: updatedOrder.id, targetRole: 'all' }
+        { orderId: updatedOrder.id, targetRole: 'all', force: true }
       );
     }
   }
@@ -995,10 +1069,11 @@ export function updateOrderStatus(
   return updatedOrder;
 }
 
-// Customer confirms receipt
-export function confirmOrderReceipt(orderId: string): void {
-  updateOrderStatus(orderId, 'completed_confirmed');
+// Customer confirms receipt with direct persistence and immediate callback
+export function confirmOrderReceipt(orderId: string): Order | undefined {
+  return updateOrderStatus(orderId, 'completed_confirmed');
 }
+
 
 // --- Statistics & Accounting ---
 export function calculateStatistics(): StatisticsData {
