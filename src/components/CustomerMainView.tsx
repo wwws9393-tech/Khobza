@@ -260,7 +260,7 @@ export const CustomerMainView: React.FC<Props> = ({
         vlanCode: currentFam.vlanCode,
         areaName: currentFam.areaName || '',
         status: 'active',
-        phone: orderWithMandoub.mandoubPhone,
+        phone: (orderWithMandoub as any).mandoubPhone,
       };
     }
 

@@ -7,6 +7,8 @@ import {
   normalizeDigits,
 } from '../services/storage';
 import { requestNotificationPermission } from '../services/notifications';
+import { registerPushSubscription } from '../services/pushService';
+import { registerFcmToken } from '../services/fcmService';
 import { Phone, CheckCircle2, UserCheck, MapPin, Sparkles, AlertCircle, Loader2 } from 'lucide-react';
 
 interface Props {
@@ -153,6 +155,11 @@ export const CustomerVerificationView: React.FC<Props> = ({
         updateFamilyLocation(family.id, location);
       }
       saveSession({ role: 'customer', phone: family.phone });
+
+      // Register WebPush & FCM for background notification delivery even when closed
+      registerPushSubscription(family.phone, 'family', family.vlanCode).catch(() => {});
+      registerFcmToken(family.phone, 'family').catch(() => {});
+
       onVerified(family, location);
     } catch (err: any) {
       setErrorMessage('حدث خطأ أثناء التحقق، يرجى المحاولة مرة أخرى.');

@@ -667,7 +667,63 @@ export async function resetDatabaseExceptAdmins(): Promise<void> {
   window.dispatchEvent(new Event('khobza_data_change'));
 }
 
-// Safe Official Stable Checkpoint Definition
+// Safe Official Stable Checkpoint Definition v1.0.5
+export const SAFE_CHECKPOINT_V105 = {
+  restorePointName: 'نقطة الاسترجاع الآمنة السحابية المعتمدة v1.0.5',
+  appName: 'Khobza Cloud Safe Checkpoint',
+  version: '1.0.5',
+  isOfficial: true,
+  createdAt: new Date().toISOString(),
+  admins: INITIAL_ADMINS,
+  versionConfig: {
+    currentVersion: '1.0.5',
+    latestVersion: '1.0.5',
+    isMandatory: false,
+    releaseNotes: 'نقطة الاسترجاع السحابية الآمنة المعتمدة v1.0.5 - تفعيل استلام الإشعارات والتطبيق مغلق تماماً للمندوب والعائلة ومزامنة سحابية مستقرة.',
+    releasedAt: new Date().toISOString(),
+  },
+};
+
+// Restore Official Stable Checkpoint v1.0.5
+export function restoreOfficialPointV105(): boolean {
+  try {
+    const checkpoint = {
+      families: [],
+      mandoubs: [],
+      admins: getAdminAccounts().length > 0 ? getAdminAccounts() : INITIAL_ADMINS,
+      orders: [],
+      renewals: [],
+      blockedPhones: [],
+      versionConfig: SAFE_CHECKPOINT_V105.versionConfig,
+    };
+
+    localStorage.setItem(KEYS.FAMILIES, JSON.stringify(checkpoint.families));
+    localStorage.setItem(KEYS.MANDOUBS, JSON.stringify(checkpoint.mandoubs));
+    localStorage.setItem(KEYS.ORDERS, JSON.stringify(checkpoint.orders));
+    localStorage.setItem(KEYS.RENEWALS, JSON.stringify(checkpoint.renewals));
+    localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify(checkpoint.blockedPhones));
+    localStorage.setItem('khobza_version_config_v1', JSON.stringify(checkpoint.versionConfig));
+
+    if (isSupabaseConfigured()) {
+      clearAllSupabaseTables().catch(() => {});
+      saveVersionConfigToSupabase(checkpoint.versionConfig).catch(() => {});
+    }
+
+    pushToServer('overwrite');
+    if (typeof fetch !== 'undefined') {
+      fetch('/api/db/restore-v105final', { method: 'POST' }).catch(() => {});
+    }
+
+    window.dispatchEvent(new Event('khobza_data_change'));
+    window.dispatchEvent(new Event('khobza_version_change'));
+    return true;
+  } catch (err) {
+    console.error('Failed to restore checkpoint v1.0.5:', err);
+    return false;
+  }
+}
+
+// Safe Official Stable Checkpoint Definition v1.0.4
 export const SAFE_CHECKPOINT_V104 = {
   restorePointName: 'نقطة الاسترجاع الآمنة السحابية المعتمدة v1.0.4.final',
   appName: 'Khobza Cloud Safe Checkpoint',

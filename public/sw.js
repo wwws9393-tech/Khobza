@@ -88,7 +88,7 @@ self.addEventListener('push', (event) => {
       timestamp: Date.now(),
     },
     actions: [
-      { action: 'open_app', title: 'فتح التطبيق' },
+      { action: 'open_app', title: 'فتح التطبيق 🥖' },
       { action: 'close', title: 'إغلاق' },
     ],
   };
@@ -96,10 +96,18 @@ self.addEventListener('push', (event) => {
   if (event.data) {
     try {
       const payload = event.data.json();
+      if (payload.notification) {
+        if (payload.notification.title) title = payload.notification.title;
+        if (payload.notification.body) body = payload.notification.body;
+        if (payload.notification.icon) options.icon = payload.notification.icon;
+        if (payload.notification.badge) options.badge = payload.notification.badge;
+      }
       if (payload.title) title = payload.title;
       if (payload.body) body = payload.body;
-      if (payload.data) options.data = { ...options.data, ...payload.data };
+      if (payload.icon) options.icon = payload.icon;
+      if (payload.badge) options.badge = payload.badge;
       if (payload.tag) options.tag = payload.tag;
+      if (payload.data) options.data = { ...options.data, ...payload.data };
     } catch (e) {
       body = event.data.text() || body;
     }

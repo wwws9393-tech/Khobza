@@ -2,7 +2,7 @@ import { AppVersionConfig } from '../types';
 import { isSupabaseConfigured, saveVersionConfigToSupabase } from './supabase';
 import { broadcastExternalPush } from './pushService';
 
-export const CURRENT_INSTALLED_VERSION = '1.0.4';
+export const CURRENT_INSTALLED_VERSION = '1.0.5';
 
 const UPDATE_CONFIG_KEY = 'khobza_version_config_v1';
 const INSTALLED_VERSION_KEY = 'khobza_installed_version_v1';
@@ -18,6 +18,15 @@ export interface StableRestorePointItem {
 }
 
 export const DEFAULT_STABLE_POINTS: StableRestorePointItem[] = [
+  {
+    id: 'v1.0.5',
+    version: '1.0.5',
+    title: 'v1.0.5 - الإصدار المستقر والآمن ونظام الإشعارات الشامل (رسمي ⭐)',
+    releaseNotes: 'الإصدار الرسمي المستقر والآمن v1.0.5 - تفعيل استلام الإشعارات عند إغلاق التطبيق كلياً للمندوب والعائلة، مزامنة الخادم المباشرة، وتثبيت نقطة الاستعادة.',
+    isMandatory: false,
+    isOfficial: true,
+    createdAt: '2026-08-14T00:00:00.000Z',
+  },
   {
     id: 'v1.0.4.final',
     version: '1.0.4.final',
@@ -106,9 +115,9 @@ export function saveStableRestorePoint(point: StableRestorePointItem): void {
 
 export const DEFAULT_VERSION_CONFIG: AppVersionConfig = {
   currentVersion: CURRENT_INSTALLED_VERSION,
-  latestVersion: '1.0.4',
-  isMandatory: true,
-  releaseNotes: 'الإصدار v1.0.4 - التثبيت الفوري الفائق بدون أي خطوات على جميع الهواتف (Android & iOS)، نقطة استعادة وتراجع مستقرة v1.0.3، وإشعار فوري بشعار الخبزة.',
+  latestVersion: '1.0.5',
+  isMandatory: false,
+  releaseNotes: 'الإصدار v1.0.5 - دعم كامل لاستلام الإشعارات وتنبيهات النظام والشريط عند إغلاق التطبيق كلياً للعائلة والمندوب، مع استقرار التزامن السحابي المباشر.',
   releasedAt: new Date().toISOString(),
 };
 

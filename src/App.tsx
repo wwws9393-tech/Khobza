@@ -19,6 +19,8 @@ import {
   updateFamilyLocation,
 } from './services/storage';
 import { requestNotificationPermission } from './services/notifications';
+import { registerPushSubscription } from './services/pushService';
+import { registerFcmToken } from './services/fcmService';
 import { checkAppUpdateInBackground, UpdateCheckResult } from './services/updateService';
 import { initAnimatedFavicon } from './utils/animatedFavicon';
 
@@ -236,6 +238,8 @@ export default function App() {
     setCurrentFamily(updatedFamily);
     setCurrentLocation(location);
     saveSession({ role: 'customer', phone: family.phone });
+    registerPushSubscription(family.phone, 'family', family.vlanCode).catch(() => {});
+    registerFcmToken(family.phone, 'family').catch(() => {});
   };
 
   // Handle Staff Login Success
@@ -246,11 +250,15 @@ export default function App() {
       setRole('mandoub');
       setCurrentMandoub(m);
       saveSession({ role: 'mandoub', mandoubId: m.id });
+      registerPushSubscription(m.phone || m.id, 'mandoub', m.vlanCode).catch(() => {});
+      registerFcmToken(m.phone || m.id, 'mandoub').catch(() => {});
     } else if (loginRole === 'admin') {
       const a = userObj as AdminUser;
       setRole('admin');
       setCurrentAdmin(a);
       saveSession({ role: 'admin', adminId: a.id });
+      registerPushSubscription(a.username || a.id, 'admin').catch(() => {});
+      registerFcmToken(a.username || a.id, 'admin').catch(() => {});
     }
   };
 

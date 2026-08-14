@@ -281,10 +281,24 @@ function writeDb(data: any) {
     }
 
     if (Array.isArray(data.pushSubscriptions)) {
-      updatedPushSubscriptions = mergeById(updatedPushSubscriptions, data.pushSubscriptions, 'push');
+      const subMap = new Map<string, any>();
+      for (const s of updatedPushSubscriptions) {
+        if (s && (s.endpoint || s.id)) subMap.set(s.endpoint || s.id, s);
+      }
+      for (const s of data.pushSubscriptions) {
+        if (s && (s.endpoint || s.id)) subMap.set(s.endpoint || s.id, { ...(subMap.get(s.endpoint || s.id) || {}), ...s });
+      }
+      updatedPushSubscriptions = Array.from(subMap.values());
     }
     if (Array.isArray(data.fcmTokens)) {
-      updatedFcmTokens = mergeById(updatedFcmTokens, data.fcmTokens, 'fcm');
+      const tokenMap = new Map<string, any>();
+      for (const t of updatedFcmTokens) {
+        if (t && (t.token || t.id)) tokenMap.set(t.token || t.id, t);
+      }
+      for (const t of data.fcmTokens) {
+        if (t && (t.token || t.id)) tokenMap.set(t.token || t.id, { ...(tokenMap.get(t.token || t.id) || {}), ...t });
+      }
+      updatedFcmTokens = Array.from(tokenMap.values());
     }
 
     const updated: DatabaseSchema = {
@@ -1007,12 +1021,25 @@ app.get('/api/push/vapid-public-key', (req, res) => {
 app.post('/api/push/subscribe', (req, res) => {
   const sub = req.body;
   if (sub && sub.endpoint) {
-    pushSubscriptions = pushSubscriptions.filter((s) => s.endpoint !== sub.endpoint);
-    pushSubscriptions.push({
+    const db = readDb();
+    let currentSubs = Array.isArray(db.pushSubscriptions) ? [...db.pushSubscriptions] : [];
+    currentSubs = currentSubs.filter((s) => s.endpoint !== sub.endpoint);
+    const newEntry = {
       ...sub,
+      id: sub.endpoint,
+      role: sub.role === 'customer' ? 'family' : (sub.role || 'family'),
       updatedAt: new Date().toISOString(),
-    });
-    writeDb({ pushSubscriptions });
+    };
+    currentSubs.push(newEntry);
+    pushSubscriptions = currentSubs;
+    db.pushSubscriptions = currentSubs;
+    db.updatedAt = new Date().toISOString();
+    try {
+      fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2), 'utf-8');
+      console.log(`[Push Server] Registered Web Push subscriber for ${newEntry.role} (${newEntry.userPhone || 'anon'}). Total active: ${currentSubs.length}`);
+    } catch (e) {
+      console.error('[Push Server] Failed saving push subscription:', e);
+    }
   }
   res.json({ success: true, count: pushSubscriptions.length });
 });
@@ -1029,14 +1056,14 @@ app.get('/api/orders', (req, res) => {
 async function dispatchServerPushNotification(options: {
   title: string;
   body: string;
-  targetRole?: 'mandoub' | 'family' | 'admin' | 'all';
+  targetRole?: 'mandoub' | 'family' | 'admin' | 'all' | 'customer' | string;
   targetPhone?: string;
   vlanCode?: string;
   orderId?: string;
 }) {
   const { title, body, targetRole, targetPhone, vlanCode, orderId } = options;
 
-  // 1. Broadcast via SSE
+  // 1. Broadcast via SSE (instant UI update for connected tabs)
   broadcastSSE({
     type: 'NOTIFICATION_PUSH',
     title,
@@ -1054,25 +1081,41 @@ async function dispatchServerPushNotification(options: {
     ? currentDb.pushSubscriptions
     : pushSubscriptions;
 
-  // 3. Filter Web Push subscribers
+  // 3. Filter Web Push subscribers with robust role and phone matching
   const matchingSubs = allSubs.filter((sub) => {
-    if (targetRole && targetRole !== 'all' && sub.role && sub.role !== targetRole) {
-      return false;
-    }
-    if (targetPhone && sub.userPhone) {
-      const p1 = normalizeIraqiPhoneNumber(sub.userPhone) || normalizeArabicDigits(sub.userPhone).replace(/\D/g, '');
-      const p2 = normalizeIraqiPhoneNumber(targetPhone) || normalizeArabicDigits(targetPhone).replace(/\D/g, '');
-      if (p1 && p2 && p1 !== p2 && !p1.endsWith(p2) && !p2.endsWith(p1) && sub.userPhone !== targetPhone) {
+    // Role filter: 'all' matches everyone. 'family' matches 'family' or 'customer'.
+    if (targetRole && targetRole !== 'all') {
+      const subRole = sub.role === 'customer' ? 'family' : sub.role;
+      const tRole = targetRole === 'customer' ? 'family' : targetRole;
+      if (subRole && subRole !== tRole) {
         return false;
       }
     }
+
+    // Phone / Identifier filter
+    if (targetPhone && sub.userPhone) {
+      const rawTarget = String(targetPhone).trim().toLowerCase();
+      const rawSub = String(sub.userPhone).trim().toLowerCase();
+      if (rawTarget !== rawSub) {
+        const p1 = normalizeIraqiPhoneNumber(rawSub) || normalizeArabicDigits(rawSub).replace(/\D/g, '');
+        const p2 = normalizeIraqiPhoneNumber(rawTarget) || normalizeArabicDigits(rawTarget).replace(/\D/g, '');
+        if (p1 && p2 && p1 !== p2 && !p1.endsWith(p2) && !p2.endsWith(p1)) {
+          return false;
+        }
+      }
+    }
+
     return true;
   });
+
+  console.log(`[Push Dispatcher] Sending notification "${title}" to ${matchingSubs.length} of ${allSubs.length} subscribers (targetRole: ${targetRole || 'all'}, targetPhone: ${targetPhone || 'all'})`);
 
   const payload = JSON.stringify({
     title: title || 'تطبيق الخبزة 🥖',
     body: body || 'لديك إشعار جديد في تطبيق الخبزة',
     tag: orderId ? `khobza-order-${orderId}` : `khobza-notif-${Date.now()}`,
+    icon: '/icon-192.png',
+    badge: '/favicon.png',
     data: {
       orderId,
       url: '/',
@@ -1082,7 +1125,7 @@ async function dispatchServerPushNotification(options: {
   });
 
   const deadEndpoints: string[] = [];
-  if (vapidKeys.publicKey && vapidKeys.privateKey) {
+  if (vapidKeys.publicKey && vapidKeys.privateKey && matchingSubs.length > 0) {
     await Promise.allSettled(
       matchingSubs.map(async (sub) => {
         try {
@@ -1095,10 +1138,16 @@ async function dispatchServerPushNotification(options: {
                   auth: sub.auth,
                 },
               },
-              payload
+              payload,
+              {
+                TTL: 86400, // Keep in queue on push server for 24 hours if device is offline
+                urgency: 'high',
+              }
             );
+            console.log(`[Push Dispatcher] WebPush successfully delivered to endpoint: ${sub.endpoint.substring(0, 45)}...`);
           }
         } catch (err: any) {
+          console.warn(`[Push Dispatcher] WebPush delivery warning for endpoint (${err.statusCode || err.message}):`, err.statusCode);
           if (err.statusCode === 404 || err.statusCode === 410) {
             deadEndpoints.push(sub.endpoint);
           }
@@ -1124,8 +1173,20 @@ app.post('/api/push/send', async (req, res) => {
 app.post('/api/fcm/token', (req, res) => {
   const tokenRecord = req.body;
   if (tokenRecord && tokenRecord.token) {
-    fcmTokens = fcmTokens.filter((t) => t.token !== tokenRecord.token);
-    fcmTokens.push(tokenRecord);
+    const db = readDb();
+    let currentTokens = Array.isArray(db.fcmTokens) ? [...db.fcmTokens] : [];
+    currentTokens = currentTokens.filter((t) => t.token !== tokenRecord.token);
+    currentTokens.push({
+      ...tokenRecord,
+      id: tokenRecord.token,
+      updatedAt: new Date().toISOString(),
+    });
+    fcmTokens = currentTokens;
+    db.fcmTokens = currentTokens;
+    try {
+      fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2), 'utf-8');
+      console.log(`[FCM Server] Registered FCM Token for ${tokenRecord.role || 'user'}. Total: ${currentTokens.length}`);
+    } catch (e) {}
   }
   res.json({ success: true, count: fcmTokens.length });
 });
@@ -1150,6 +1211,27 @@ app.post('/api/cloudflare/push', async (req, res) => {
   });
 });
 
+// Restore Official v1.0.5 Checkpoint
+app.post('/api/db/restore-v105final', (req, res) => {
+  const checkpoint = {
+    admins: defaultDb.admins,
+    mandoubs: [],
+    families: [],
+    orders: [],
+    renewals: [],
+    blockedPhones: [],
+    versionConfig: {
+      currentVersion: '1.0.5',
+      latestVersion: '1.0.5',
+      isMandatory: false,
+      releaseNotes: 'الإصدار الرسمي المستقر وآمن v1.0.5',
+      releasedAt: new Date().toISOString(),
+    },
+    action: 'overwrite'
+  };
+  writeDb(checkpoint);
+  res.json({ success: true, data: checkpoint });
+});
 
 // Restore Official v1.0.4.final Checkpoint
 app.post('/api/db/restore-v104final', (req, res) => {

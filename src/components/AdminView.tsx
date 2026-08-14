@@ -24,6 +24,7 @@ import {
   rejectRenewalRequestByAdmin,
   renewFamilySubscription,
   resetDatabaseExceptAdmins,
+  restoreOfficialPointV105,
   restoreOfficialPointV104Final,
   restoreOfficialPointV104Screen,
   resetToDefaultSeed,
@@ -2089,6 +2090,24 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
               <button
                 type="button"
                 onClick={() => {
+                  if (window.confirm('هل أنت متأكد من تطبيق نقطة الاسترجاع الآمنة السحابية المعتمدة v1.0.5؟ سيتم تحديث وتثبيت الإصدار فوراً وتفعيل الإشعارات وتزامن الخادم.')) {
+                    restoreOfficialPointV105();
+                    setInstalledVersion('1.0.5');
+                    setVersionInput('1.0.5');
+                    setIsMandatoryInput(false);
+                    setReleaseNotesInput('نقطة الاسترجاع السحابية الآمنة المعتمدة v1.0.5 - تفعيل استلام الإشعارات والتطبيق مغلق تماماً للمندوب والعائلة ومزامنة سحابية مستقرة.');
+                    setVersionSaveSuccess(true);
+                    alert('✅ تم تطبيق نقطة الاسترجاع الآمنة السحابية المعتمدة v1.0.5 بنجاح!');
+                  }
+                }}
+                className="px-4 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+              >
+                <span>نقطة الاسترجاع الآمنة المعتمدة v1.0.5 🛡️</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
                   if (window.confirm('هل أنت متأكد من تطبيق نقطة الاسترجاع الآمنة السحابية المعتمدة v1.0.4.final؟ سيتم تحديث وتثبيت الإصدار فوراً وضبط استقرار النظام.')) {
                     restoreOfficialPointV104Final();
                     setInstalledVersion('1.0.4');
@@ -2099,9 +2118,9 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
                     alert('✅ تم تطبيق نقطة الاسترجاع الآمنة السحابية المعتمدة بنجاح!');
                   }
                 }}
-                className="px-4 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+                className="px-4 py-3 bg-emerald-700 hover:bg-emerald-800 text-white font-extrabold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
               >
-                <span>نقطة الاسترجاع الآمنة المعتمدة v1.0.4.final 🛡️</span>
+                <span>نقطة الاسترجاع v1.0.4.final</span>
               </button>
 
               <button

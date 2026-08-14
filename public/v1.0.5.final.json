@@ -1,0 +1,28 @@
+{
+  "restorePointName": "v1.0.5",
+  "appName": "Khobza Official Stable Restore Point v1.0.5",
+  "version": "1.0.5",
+  "createdAt": "2026-08-14T00:00:00.000Z",
+  "status": "stable_and_safe",
+  "description": "نقطة استعادة رسمية ومستقرة وآمنة لنظام الخبزة v1.0.5 - دعم كامل لإشعارات الخلفية والتطبيق مغلق تماماً للعائلة والمندوب ومزامنة سحابية مستقرة",
+  "families": [],
+  "mandoubs": [],
+  "admins": [
+    {
+      "id": "admin-1",
+      "username": "admin123",
+      "password": "admin123",
+      "fullName": "المدير العام (الأدمن الرئيس)"
+    }
+  ],
+  "orders": [],
+  "renewals": [],
+  "blockedPhones": [],
+  "versionConfig": {
+    "currentVersion": "1.0.5",
+    "latestVersion": "1.0.5",
+    "isMandatory": false,
+    "releaseNotes": "الإصدار الرسمي المستقر والآمن v1.0.5 - تفعيل استلام الإشعارات عند إغلاق التطبيق كلياً للمندوب والعائلة، مزامنة الخادم المباشرة، وتثبيت نقطة الاستعادة.",
+    "releasedAt": "2026-08-14T00:00:00.000Z"
+  }
+}
