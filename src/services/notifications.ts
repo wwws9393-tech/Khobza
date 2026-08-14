@@ -1,17 +1,18 @@
 // Browser Native System Notification Service with Web Audio Sound Chime for Khobza App
 import { getSavedSession } from './storage';
-import { broadcastExternalPush } from './pushService';
-import { sendFcmNotification } from './fcmService';
 import { sendCloudflarePush } from './cloudflarePushService';
 
-// Web Audio API Synthesizer for Loud Mobile Notification Chime Sound (Background only)
+// Web Audio API Synthesizer for Loud Mobile Notification Chime Sound
+let lastChimePlayedTime = 0;
+
 export function playNotificationChimeSound(force: boolean = false): void {
   try {
-    // Only play chime sound if forced or if app is in background/hidden
-    const isAppHidden = typeof document !== 'undefined' && (document.hidden || document.visibilityState !== 'visible');
-    if (!force && !isAppHidden) {
+    const nowTime = Date.now();
+    // Debounce chime so it doesn't overlap or spam if multiple calls occur within 1.5 seconds
+    if (nowTime - lastChimePlayedTime < 1500 && !force) {
       return;
     }
+    lastChimePlayedTime = nowTime;
 
     const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
     if (!AudioContext) return;
@@ -95,9 +96,14 @@ export function saveNotificationToHistory(
     // Save into history
     const existingHistoryStr = localStorage.getItem('khobza_notifications_history') || '[]';
     const history: StoredNotification[] = JSON.parse(existingHistoryStr);
-    history.unshift(item);
-    // Keep last 30 notifications
-    localStorage.setItem('khobza_notifications_history', JSON.stringify(history.slice(0, 30)));
+    // Deduplicate history entry if same order was logged in last 10 seconds
+    const isDup = history.some(
+      (h) => (options?.orderId && h.orderId === options.orderId) || (h.title === title && Date.now() - h.timestamp < 10000)
+    );
+    if (!isDup) {
+      history.unshift(item);
+      localStorage.setItem('khobza_notifications_history', JSON.stringify(history.slice(0, 30)));
+    }
   } catch (e) {
     console.warn('Failed to save notification history:', e);
   }
@@ -133,41 +139,81 @@ export function requestNotificationPermission(): Promise<PermissionState | 'defa
   });
 }
 
+// In-memory deduplication cache to prevent repeating identical notifications
+const recentlyDispatchedAlerts = new Map<string, number>();
+
 export function sendBrowserNotification(
   title: string,
   body: string,
-  options?: { orderId?: string; targetRole?: 'mandoub' | 'family' | 'admin' | 'all'; force?: boolean }
+  options?: {
+    orderId?: string;
+    targetRole?: 'mandoub' | 'family' | 'admin' | 'all';
+    targetPhone?: string;
+    vlanCode?: string;
+    force?: boolean;
+    skipPush?: boolean;
+  }
 ): void {
-  // Always save notification to in-app history log
-  const savedNotif = saveNotificationToHistory(title, body, options);
+  const dedupKey = options?.orderId ? `order_${options.orderId}` : `${title}_${body}`;
+  const lastSent = recentlyDispatchedAlerts.get(dedupKey);
+  const now = Date.now();
 
-  // Check target role against active session role to avoid alerting wrong user (unless force is true)
+  // If identical notification was sent within 15 seconds, suppress duplicate
+  if (lastSent && now - lastSent < 15000 && !options?.force) {
+    return;
+  }
+  recentlyDispatchedAlerts.set(dedupKey, now);
+
+  // Check target role and targetPhone against active session to avoid alerting wrong user locally
+  let isTargetMatch = false;
   try {
     const session = getSavedSession();
-    const isTargetMatch =
-      !options?.targetRole ||
-      options.targetRole === 'all' ||
-      options.force === true ||
-      (options.targetRole === 'mandoub' && session.role === 'mandoub') ||
-      (options.targetRole === 'family' && session.role === 'customer') ||
-      (options.targetRole === 'admin' && session.role === 'admin');
+    if (!options?.targetRole || options.targetRole === 'all') {
+      isTargetMatch = true;
+    } else if (options.targetRole === 'mandoub' && session.role === 'mandoub') {
+      isTargetMatch = true;
+    } else if (options.targetRole === 'family' && session.role === 'customer') {
+      if (options.targetPhone && session.phone) {
+        const p1 = session.phone.replace(/\D/g, '');
+        const p2 = options.targetPhone.replace(/\D/g, '');
+        isTargetMatch = !p1 || !p2 || p1 === p2 || p1.endsWith(p2) || p2.endsWith(p1);
+      } else {
+        isTargetMatch = true;
+      }
+    } else if (options.targetRole === 'admin' && session.role === 'admin') {
+      isTargetMatch = true;
+    }
 
     if (!isTargetMatch) {
+      // Dispatch remote push notification to reach the intended recipient's device
+      if (!options?.skipPush) {
+        sendCloudflarePush({
+          title,
+          body,
+          targetRole: options?.targetRole,
+          targetPhone: options?.targetPhone,
+          orderId: options?.orderId,
+        }).catch(() => {});
+      }
+      // Suppress local sound, vibration, notification tray, and local alert on this device
       return;
     }
   } catch (err) {}
 
-  // Vibrate mobile phone hardware if supported (Android & compatible devices)
+  // Save notification to history
+  const savedNotif = saveNotificationToHistory(title, body, options);
+
+  // Vibrate mobile phone hardware once
   if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
     try {
-      navigator.vibrate([500, 200, 500, 200, 500, 200, 800]);
+      navigator.vibrate([500, 200, 500, 200, 600]);
     } catch (e) {}
   }
 
-  // Play audio chime sound for Mandoub / family / admin on both Android & iOS
-  playNotificationChimeSound(true);
+  // Play audio chime once
+  playNotificationChimeSound(false);
 
-  // Also dispatch in-app custom event for live modal/toast notifications
+  // In-app alert event for live toast / badge
   if (typeof window !== 'undefined') {
     try {
       window.dispatchEvent(
@@ -178,43 +224,34 @@ export function sendBrowserNotification(
     } catch (e) {}
   }
 
-  // Dispatch to external Cloudflare Edge, FCM & WebPush when app might be closed in background
-  try {
-    broadcastExternalPush({
-      title,
-      body,
-      targetRole: options?.targetRole,
-      orderId: options?.orderId,
-    }).catch(() => {});
-    sendFcmNotification({
-      title,
-      body,
-      targetRole: options?.targetRole,
-      orderId: options?.orderId,
-    }).catch(() => {});
-    sendCloudflarePush({
-      title,
-      body,
-      targetRole: options?.targetRole,
-      orderId: options?.orderId,
-    }).catch(() => {});
-  } catch (e) {}
+  // Unified Single Cloudflare Push Gateway dispatch
+  if (!options?.skipPush) {
+    try {
+      sendCloudflarePush({
+        title,
+        body,
+        targetRole: options?.targetRole,
+        orderId: options?.orderId,
+      }).catch(() => {});
+    } catch (e) {}
+  }
 
-  // Dispatch Native OS Mobile System Tray Notification (Android & iOS PWA Safari)
+  // Single OS Notification Tray Banner (PWA / Mobile browser)
   try {
     if (!('Notification' in window)) return;
 
     const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
     const isIos = /iPad|iPhone|iPod/.test(userAgent) || (typeof navigator !== 'undefined' && navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const notifTag = options?.orderId ? `khobza-order-${options.orderId}` : 'khobza-unified-alert';
 
     const dispatchNotif = (reg?: ServiceWorkerRegistration) => {
       const notifOptions: any = {
         body,
         icon: '/apple-touch-icon.png',
         badge: '/apple-touch-icon.png',
-        tag: 'khobza-notif-' + savedNotif.id,
+        tag: notifTag,
         renotify: true,
-        requireInteraction: true,
+        requireInteraction: false,
         data: {
           title,
           body,
@@ -224,19 +261,18 @@ export function sendBrowserNotification(
         },
       };
 
-      // Omit vibrate array on iOS Safari to prevent TypeError constructor crash
       if (!isIos) {
-        notifOptions.vibrate = [500, 200, 500, 200, 500, 200, 800];
+        notifOptions.vibrate = [500, 200, 500, 200, 600];
       }
 
       if (reg && reg.showNotification) {
         try {
           reg.showNotification(title, notifOptions);
         } catch (e) {
-          createWindowNotification(title, body, savedNotif);
+          createWindowNotification(title, body, notifTag);
         }
       } else {
-        createWindowNotification(title, body, savedNotif);
+        createWindowNotification(title, body, notifTag);
       }
     };
 
@@ -248,18 +284,6 @@ export function sendBrowserNotification(
       } else {
         dispatchNotif();
       }
-    } else if (Notification.permission === 'default') {
-      Notification.requestPermission().then((perm) => {
-        if (perm === 'granted') {
-          if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.ready
-              .then((reg) => dispatchNotif(reg))
-              .catch(() => dispatchNotif());
-          } else {
-            dispatchNotif();
-          }
-        }
-      });
     }
   } catch (err) {
     console.warn('Failed to dispatch native browser notification:', err);
@@ -269,14 +293,14 @@ export function sendBrowserNotification(
 function createWindowNotification(
   title: string,
   body: string,
-  savedNotif: StoredNotification
+  tag: string
 ): void {
   try {
     const notification = new Notification(title, {
       body,
       icon: '/apple-touch-icon.png',
       badge: '/apple-touch-icon.png',
-      tag: 'khobza-notif-' + savedNotif.id,
+      tag,
     });
 
     notification.onclick = () => {

@@ -4,12 +4,18 @@ import {
   confirmOrderReceipt,
   createOrder,
   createRenewalRequest,
+  getFamilyByPhone,
   getMandoubs,
   getOrders,
   getRenewalRequests,
+  isOrderMatchedToMandoub,
+  isVlanMatching,
+  normalizeIraqiPhone,
+  normalizeVlanCode,
   pushToServer,
+  syncWithServer,
 } from '../services/storage';
-import { sendBrowserNotification } from '../services/notifications';
+import { requestNotificationPermission, sendBrowserNotification } from '../services/notifications';
 import { registerPushSubscription } from '../services/pushService';
 import { registerFcmToken } from '../services/fcmService';
 
@@ -58,6 +64,7 @@ export const CustomerMainView: React.FC<Props> = ({
   const [priceAmount, setPriceAmount] = useState<number>(1000);
   const [selectedTimeSlot, setSelectedTimeSlot] = useState<TimeSlot>('morning');
 
+  const [activeFamily, setActiveFamily] = useState<Family>(family);
   const [customerOrders, setCustomerOrders] = useState<Order[]>([]);
   const [assignedMandoub, setAssignedMandoub] = useState<Mandoub | null>(null);
   const [orderSuccessMessage, setOrderSuccessMessage] = useState<string | null>(null);
@@ -143,12 +150,32 @@ export const CustomerMainView: React.FC<Props> = ({
 
   // Sync active orders, assigned mandoub, and latest renewal request for this family
   const loadOrders = () => {
+    // 1. Refresh active family from local storage / cloud state
+    const currentFam = getFamilyByPhone(family.phone) || family;
+    setActiveFamily(currentFam);
+
     const allOrders = getOrders();
-    const familyOrders = allOrders.filter((o) => o.familyPhone === family.phone);
+    const famPhoneNorm = normalizeIraqiPhone(currentFam.phone || family.phone);
+    const familyOrders = allOrders.filter((o) => {
+      if (o.familyId && (o.familyId === currentFam.id || o.familyId === family.id)) {
+        return true;
+      }
+      const orderPhoneNorm = normalizeIraqiPhone(o.familyPhone);
+      if (
+        famPhoneNorm &&
+        orderPhoneNorm &&
+        (famPhoneNorm === orderPhoneNorm ||
+          famPhoneNorm.endsWith(orderPhoneNorm) ||
+          orderPhoneNorm.endsWith(famPhoneNorm))
+      ) {
+        return true;
+      }
+      return o.familyPhone === currentFam.phone || o.familyPhone === family.phone;
+    });
     setCustomerOrders(familyOrders);
 
     // Load latest renewal request for this family, ignoring permanently dismissed banners
-    const key = `khobza_dismissed_renewals_${family.id}`;
+    const key = `khobza_dismissed_renewals_${currentFam.id}`;
     let dismissedIds: string[] = [];
     try {
       dismissedIds = JSON.parse(localStorage.getItem(key) || '[]');
@@ -157,7 +184,9 @@ export const CustomerMainView: React.FC<Props> = ({
     const renewals = getRenewalRequests();
     const famRenewals = renewals.filter(
       (r) =>
-        (r.familyId === family.id || r.familyPhone === family.phone) &&
+        (r.familyId === currentFam.id ||
+          r.familyPhone === currentFam.phone ||
+          r.familyPhone === family.phone) &&
         !dismissedIds.includes(r.id)
     );
     if (famRenewals.length > 0) {
@@ -167,7 +196,7 @@ export const CustomerMainView: React.FC<Props> = ({
     }
 
     // Notify customer on family device if an order reaches under_review ("وصل الخبز إلى منزلكم")
-    const notifiedKey = `khobza_family_notified_orders_${family.id}`;
+    const notifiedKey = `khobza_family_notified_orders_${currentFam.id}`;
     let notifiedIds: string[] = [];
     try {
       notifiedIds = JSON.parse(localStorage.getItem(notifiedKey) || '[]');
@@ -181,7 +210,7 @@ export const CustomerMainView: React.FC<Props> = ({
         sendBrowserNotification(
           '🎉 وصل الخبز إلى منزلكم!',
           `قام المندوب بتوصيل طلب الخبز (${o.quantity} ${o.unitText}). يرجى تأكيد الاستلام الآن!`,
-          { orderId: o.id, targetRole: 'family', force: true }
+          { orderId: o.id, targetRole: 'family', targetPhone: currentFam.phone, force: true }
         );
         notifiedSet.add(o.id);
         newlyNotified = true;
@@ -195,30 +224,108 @@ export const CustomerMainView: React.FC<Props> = ({
     }
 
     const mandoubs = getMandoubs();
-    const matched = mandoubs.find(
-      (m) => m.vlanCode === family.vlanCode && m.status === 'active'
-    );
-    setAssignedMandoub(matched || null);
+    const activeMandoubs = mandoubs.filter((m) => !m.status || m.status === 'active');
+    
+    // Check if any recent order already has an assigned Mandoub
+    let assigned: Mandoub | null = null;
+    const orderWithMandoub = familyOrders.find((o) => o.mandoubId || o.mandoubName);
+    if (orderWithMandoub?.mandoubId) {
+      assigned = activeMandoubs.find((m) => m.id === orderWithMandoub.mandoubId) || null;
+    }
+    if (!assigned && orderWithMandoub?.mandoubName) {
+      assigned = activeMandoubs.find(
+        (m) =>
+          (m.name && m.name.trim() === orderWithMandoub.mandoubName?.trim()) ||
+          (m.username && m.username.trim() === orderWithMandoub.mandoubName?.trim())
+      ) || null;
+    }
+    if (!assigned) {
+      const matched = activeMandoubs.find((m) =>
+        isOrderMatchedToMandoub(
+          { vlanCode: currentFam.vlanCode, areaName: currentFam.areaName },
+          m,
+          activeMandoubs
+        )
+      );
+      const fallbackMandoub = !matched && activeMandoubs.length === 1 ? activeMandoubs[0] : null;
+      assigned = matched || fallbackMandoub || (activeMandoubs.length > 0 ? activeMandoubs[0] : null);
+    }
+
+    if (!assigned && orderWithMandoub?.mandoubName) {
+      assigned = {
+        id: orderWithMandoub.mandoubId || 'mandoub-active',
+        name: orderWithMandoub.mandoubName,
+        username: orderWithMandoub.mandoubName,
+        password: '',
+        vlanCode: currentFam.vlanCode,
+        areaName: currentFam.areaName || '',
+        status: 'active',
+        phone: orderWithMandoub.mandoubPhone,
+      };
+    }
+
+    setAssignedMandoub(assigned);
   };
 
   useEffect(() => {
-    if (family?.phone) {
-      registerFcmToken(family.phone, 'family', family.vlanCode).catch(() => {});
+    requestNotificationPermission().catch(() => {});
+    if (family?.phone || family?.id) {
+      registerFcmToken(family.phone || family.id, 'family', family.vlanCode).catch(() => {});
+      registerPushSubscription(family.phone || family.id, 'family', family.vlanCode).catch(() => {});
     }
+
+    const fetchDirectOrders = async () => {
+      try {
+        const res = await fetch(`/api/orders?t=${Date.now()}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Array.isArray(data.orders)) {
+            const currentStr = localStorage.getItem('khobza_orders_v2');
+            const nextStr = JSON.stringify(data.orders);
+            if (currentStr !== nextStr) {
+              localStorage.setItem('khobza_orders_v2', nextStr);
+              loadOrders();
+            }
+          }
+        }
+      } catch (e) {}
+    };
+
+    // Direct cloud sync immediately on launch
+    syncWithServer(true).then(() => {
+      fetchDirectOrders();
+      loadOrders();
+    }).catch(() => {
+      fetchDirectOrders();
+      loadOrders();
+    });
+
     loadOrders();
     const handleStorageChange = () => loadOrders();
     window.addEventListener('khobza_data_change', handleStorageChange);
     window.addEventListener('storage', handleStorageChange);
 
-    // Poll every 1 second for live delivery updates and rapid responsiveness
-    const interval = setInterval(() => loadOrders(), 1000);
+    const handleFocusOrVisibility = () => {
+      fetchDirectOrders();
+      syncWithServer(true).then(() => loadOrders()).catch(() => loadOrders());
+    };
+    window.addEventListener('focus', handleFocusOrVisibility);
+    document.addEventListener('visibilitychange', handleFocusOrVisibility);
+
+    // Live continuous sync and delivery status poll every 1.5 seconds
+    const interval = setInterval(() => {
+      fetchDirectOrders();
+      syncWithServer(true).then(() => loadOrders()).catch(() => loadOrders());
+    }, 1500);
 
     return () => {
       window.removeEventListener('khobza_data_change', handleStorageChange);
       window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('focus', handleFocusOrVisibility);
+      document.removeEventListener('visibilitychange', handleFocusOrVisibility);
       clearInterval(interval);
     };
-  }, [family.phone, family.vlanCode]);
+  }, [family.phone, family.id, family.vlanCode]);
 
   // Helper for quantity unit text
   const getUnitText = (type: OrderType, qty: number) => {
@@ -279,8 +386,6 @@ export const CustomerMainView: React.FC<Props> = ({
         });
       }
 
-      pushToServer('overwrite');
-
       setIsOrderSubmitted(true);
       setTimeout(() => {
         setIsOrderSubmitted(false);
@@ -311,7 +416,7 @@ export const CustomerMainView: React.FC<Props> = ({
       )
     );
     setOrderSuccessMessage('تم تأكيد وصول واستلام طلب الخبز بنجاح! بالعافية 🥖');
-    pushToServer('overwrite');
+    pushToServer('merge');
     setTimeout(() => {
       loadOrders();
     }, 100);
@@ -324,7 +429,7 @@ export const CustomerMainView: React.FC<Props> = ({
       family,
       requestedPackage: selectedPackageForRenewal,
     });
-    pushToServer('overwrite');
+    pushToServer('merge');
     setShowRenewalModal(false);
     loadOrders();
   };

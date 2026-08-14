@@ -1,14 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { LocationData, Family } from '../types';
 import {
-  getFamilyByPhone,
-  isPhoneBlocked,
+  verifyCustomerPhone,
   saveSession,
   updateFamilyLocation,
   normalizeDigits,
 } from '../services/storage';
 import { requestNotificationPermission } from '../services/notifications';
-import { Phone, CheckCircle2, UserCheck, MapPin, Sparkles, AlertCircle, Smartphone, Download } from 'lucide-react';
+import { Phone, CheckCircle2, UserCheck, MapPin, Sparkles, AlertCircle, Loader2 } from 'lucide-react';
 
 interface Props {
   onVerified: (family: Family, location: LocationData) => void;
@@ -19,9 +18,9 @@ interface Props {
 export const CustomerVerificationView: React.FC<Props> = ({
   onVerified,
   onOpenStaffLogin,
-  onInstallClick,
 }) => {
   const [phone, setPhone] = useState('');
+  const [isVerifying, setIsVerifying] = useState(false);
   const [location, setLocation] = useState<LocationData>({
     lat: 33.3128,
     lng: 44.3615,
@@ -85,14 +84,12 @@ export const CustomerVerificationView: React.FC<Props> = ({
     };
 
     if (navigator.geolocation) {
-      // Immediate position check
       navigator.geolocation.getCurrentPosition(handlePos, handleError, {
         enableHighAccuracy: true,
         timeout: 20000,
         maximumAge: 0,
       });
 
-      // Continuous watchPosition to refine satellite precision to 100% accuracy
       watchId = navigator.geolocation.watchPosition(handlePos, handleError, {
         enableHighAccuracy: true,
         timeout: 25000,
@@ -109,7 +106,7 @@ export const CustomerVerificationView: React.FC<Props> = ({
     };
   }, []);
 
-  const handleVerify = (e: React.FormEvent) => {
+  const handleVerify = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
@@ -119,41 +116,49 @@ export const CustomerVerificationView: React.FC<Props> = ({
       return;
     }
 
-    // Check if phone is blocked
-    if (isPhoneBlocked(cleanPhone)) {
-      setErrorMessage('عذراً، هذا الرقم محظور من استخدام التطبيق. يرجى التواصل مع الإدارة.');
-      return;
-    }
+    setIsVerifying(true);
 
-    // Check if phone exists in Admin Database
-    const family = getFamilyByPhone(cleanPhone);
+    try {
+      // Direct async verification from Supabase / Server Cloud Database
+      const result = await verifyCustomerPhone(cleanPhone, location);
 
-    if (!family) {
-      setErrorMessage('تحقق من معلومات الاشتراك');
-      return;
-    }
+      if (!result.success || !result.family) {
+        setErrorMessage(result.message || 'تحقق من معلومات الاشتراك أو تواصل مع إدارة الخبزة.');
+        setIsVerifying(false);
+        return;
+      }
 
-    if (family.isBlocked) {
-      setErrorMessage('عذراً، تم حظر اشتراك هذه العائلة من قبل الإدارة.');
-      return;
-    }
+      const family = result.family;
 
-    if (family.subscriptionStatus === 'expired' || family.daysRemaining <= 0) {
-      setErrorMessage('اشتراك العائلة منتهي الصلاحية. يرجى التجديد عبر الإدارة.');
-      return;
-    }
+      if (family.isBlocked) {
+        setErrorMessage('عذراً، تم حظر اشتراك هذه العائلة من قبل الإدارة.');
+        setIsVerifying(false);
+        return;
+      }
 
-    if (family.subscriptionStatus !== 'active') {
-      setErrorMessage('تحقق من معلومات الاشتراك');
-      return;
-    }
+      if (family.subscriptionStatus === 'expired' || family.daysRemaining <= 0) {
+        setErrorMessage('اشتراك العائلة منتهي الصلاحية. يرجى التجديد عبر الإدارة.');
+        setIsVerifying(false);
+        return;
+      }
 
-    // Successfully verified! Save exact phone GPS location to family record & save session
-    if (location && location.lat && location.lng) {
-      updateFamilyLocation(family.id, location);
+      if (family.subscriptionStatus !== 'active') {
+        setErrorMessage('تحقق من معلومات الاشتراك');
+        setIsVerifying(false);
+        return;
+      }
+
+      // Successfully verified! Save location and session
+      if (location && location.lat && location.lng) {
+        updateFamilyLocation(family.id, location);
+      }
+      saveSession({ role: 'customer', phone: family.phone });
+      onVerified(family, location);
+    } catch (err: any) {
+      setErrorMessage('حدث خطأ أثناء التحقق، يرجى المحاولة مرة أخرى.');
+    } finally {
+      setIsVerifying(false);
     }
-    saveSession({ role: 'customer', phone: family.phone });
-    onVerified(family, location);
   };
 
   return (
@@ -217,10 +222,20 @@ export const CustomerVerificationView: React.FC<Props> = ({
 
           <button
             type="submit"
-            className="w-full py-4 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-700 hover:to-amber-600 text-white font-extrabold text-base rounded-xl shadow-lg shadow-amber-500/20 active:scale-[0.98] transition-all flex items-center justify-center gap-2"
+            disabled={isVerifying}
+            className="w-full py-4 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-700 hover:to-amber-600 disabled:opacity-75 disabled:cursor-not-allowed text-white font-extrabold text-base rounded-xl shadow-lg shadow-amber-500/20 active:scale-[0.98] transition-all flex items-center justify-center gap-2"
           >
-            <CheckCircle2 className="w-5 h-5" />
-            <span>تحقق</span>
+            {isVerifying ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span>جاري التحقق من السحابة...</span>
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="w-5 h-5" />
+                <span>تحقق ودخول الحساب 🥖</span>
+              </>
+            )}
           </button>
         </form>
 

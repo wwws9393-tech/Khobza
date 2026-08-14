@@ -76,20 +76,10 @@ export default function App() {
         setCurrentLocation(fam.location);
         return;
       } else {
-        // Keep session active while cloud sync runs in background
-        setRole('customer');
-        setCurrentFamily({
-          id: `fam-session-${session.phone}`,
-          phone: session.phone,
-          fullName: 'عائلة متصلة',
-          vlanCode: '',
-          areaName: 'المنطقة الرئيسية',
-          activationDate: new Date().toISOString().split('T')[0],
-          daysRemaining: 30,
-          subscriptionStatus: 'active',
-          isBlocked: false,
-          location: currentLocation,
-        });
+        // Family was deleted or database was reset - cleanly invalidate session immediately
+        clearSession();
+        setRole('guest');
+        setCurrentFamily(null);
         return;
       }
     }
@@ -107,17 +97,10 @@ export default function App() {
         setCurrentMandoub(mand);
         return;
       } else {
-        // Keep mandoub session active while cloud sync completes
-        setRole('mandoub');
-        setCurrentMandoub({
-          id: session.mandoubId,
-          name: 'مندوب التوصيل',
-          username: 'mandoub',
-          password: '',
-          vlanCode: '',
-          areaName: 'المنطقة المخصصة',
-          status: 'active',
-        });
+        // Mandoub was deleted or database was reset - cleanly invalidate session immediately
+        clearSession();
+        setRole('guest');
+        setCurrentMandoub(null);
         return;
       }
     }
@@ -132,6 +115,11 @@ export default function App() {
       } else if (admins.length > 0) {
         setRole('admin');
         setCurrentAdmin(admins[0]);
+        return;
+      } else {
+        clearSession();
+        setRole('guest');
+        setCurrentAdmin(null);
         return;
       }
     }
@@ -149,6 +137,15 @@ export default function App() {
 
     // Start animated dynamic SVG app icon favicon
     const cleanupFavicon = initAnimatedFavicon();
+
+    // Handler for immediate forced logout triggered by cloud deletion or reset
+    const handleSessionTerminated = (e: any) => {
+      clearSession();
+      setRole('guest');
+      setCurrentFamily(null);
+      setCurrentMandoub(null);
+      setCurrentAdmin(null);
+    };
 
     // Listen for Android/iOS PWA install prompt
     const handleBeforeInstallPrompt = (e: Event) => {
@@ -193,6 +190,7 @@ export default function App() {
 
     window.addEventListener('khobza_data_change', restoreSession);
     window.addEventListener('storage', restoreSession);
+    window.addEventListener('khobza_session_terminated', handleSessionTerminated);
     window.addEventListener('khobza_version_change', runUpdateCheck);
 
     return () => {
@@ -200,6 +198,7 @@ export default function App() {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
       window.removeEventListener('khobza_data_change', restoreSession);
       window.removeEventListener('storage', restoreSession);
+      window.removeEventListener('khobza_session_terminated', handleSessionTerminated);
       window.removeEventListener('khobza_version_change', runUpdateCheck);
     };
   }, []);

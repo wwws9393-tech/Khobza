@@ -1,4 +1,6 @@
 import { AppVersionConfig } from '../types';
+import { isSupabaseConfigured, saveVersionConfigToSupabase } from './supabase';
+import { broadcastExternalPush } from './pushService';
 
 export const CURRENT_INSTALLED_VERSION = '1.0.4';
 
@@ -126,6 +128,18 @@ export function saveAppVersionConfig(config: AppVersionConfig): void {
   try {
     localStorage.setItem(UPDATE_CONFIG_KEY, JSON.stringify(config));
     window.dispatchEvent(new Event('khobza_version_change'));
+
+    // Persist to Supabase app_version_config table
+    if (isSupabaseConfigured()) {
+      saveVersionConfigToSupabase(config).catch(() => {});
+    }
+
+    // Broadcast external push notification for instant update awareness
+    broadcastExternalPush({
+      title: `🥖 تحديث جديد لتطبيق الخبزة (v${config.latestVersion})`,
+      body: config.releaseNotes || 'تم إصدار تحديث جديد ومستقر لتطبيق الخبزة! يرجى فتح التطبيق لتطبيقه فورا.',
+      targetRole: 'all',
+    });
   } catch (err) {
     console.error('Failed to save version config:', err);
   }

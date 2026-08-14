@@ -2,10 +2,15 @@ import React, { useState, useEffect, useRef } from 'react';
 import { LocationData, Mandoub, Order, RenewalRequest } from '../types';
 import {
   confirmRenewalRequestByMandoub,
+  getMandoubs,
   getOrders,
   getRenewalRequests,
+  isOrderMatchedToMandoub,
+  isVlanMatching,
+  normalizeVlanCode,
   rejectRenewalRequestByMandoub,
   saveMandoub,
+  syncWithServer,
   updateMandoubLocation,
   updateOrderStatus,
 } from '../services/storage';
@@ -70,15 +75,16 @@ export const MandoubView: React.FC<Props> = ({ mandoub, onLogout }) => {
 
   const prevOrderIdsRef = useRef<Set<string>>(new Set());
 
-  // Load orders and renewals for this Mandoub's VLAN
+  // Load orders and renewals for this Mandoub
   const loadData = () => {
     const all = getOrders();
-    const mandoubVlan = (mandoub.vlanCode || '').trim().toUpperCase();
-    const vlanOrders = all.filter(
-      (o) => (o.vlanCode || '').trim().toUpperCase() === mandoubVlan
+    const allMandoubs = getMandoubs().filter((m) => !m.status || m.status === 'active');
+
+    const vlanOrders = all.filter((o) =>
+      isOrderMatchedToMandoub(o, mandoub, allMandoubs)
     );
 
-    // Check for new incoming orders and alert the Mandoub with chime sound, vibration, and system notification
+    // Check for new incoming orders and alert the Mandoub with ONE consolidated notification
     const notifiedKey = `khobza_mandoub_notified_orders_${mandoub.id}`;
     let notifiedIds: string[] = [];
     try {
@@ -86,22 +92,30 @@ export const MandoubView: React.FC<Props> = ({ mandoub, onLogout }) => {
     } catch (e) {}
 
     const notifiedSet = new Set(notifiedIds);
-    let newlyNotified = false;
+    const newPendingOrders = vlanOrders.filter(
+      (o) => o.status === 'pending' && !notifiedSet.has(o.id)
+    );
 
-    vlanOrders.forEach((o) => {
-      if (o.status === 'pending' && !notifiedSet.has(o.id)) {
+    if (newPendingOrders.length > 0) {
+      if (newPendingOrders.length === 1) {
+        const o = newPendingOrders[0];
         const orderDesc = `طلب خبز جديد (${o.quantity} ${o.unitText}) - عائلة ${o.familyName}`;
         sendBrowserNotification('طلب خبز جديد وصل للمندوب! 🥖🔔', orderDesc, {
           orderId: o.id,
           targetRole: 'mandoub',
           force: true,
         });
-        notifiedSet.add(o.id);
-        newlyNotified = true;
+      } else {
+        const latestOrder = newPendingOrders[0];
+        const summaryDesc = `وصلك ${newPendingOrders.length} طلبات خبز جديدة بانتظار الاستلام والتوصيل في منطقتك`;
+        sendBrowserNotification('طلبات خبز جديدة للمندوب! 🥖🔔', summaryDesc, {
+          orderId: latestOrder.id,
+          targetRole: 'mandoub',
+          force: true,
+        });
       }
-    });
 
-    if (newlyNotified) {
+      newPendingOrders.forEach((o) => notifiedSet.add(o.id));
       try {
         localStorage.setItem(notifiedKey, JSON.stringify(Array.from(notifiedSet)));
       } catch (e) {}
@@ -110,8 +124,8 @@ export const MandoubView: React.FC<Props> = ({ mandoub, onLogout }) => {
     setOrders(vlanOrders);
 
     const allRenewals = getRenewalRequests();
-    const vlanRenewals = allRenewals.filter(
-      (r) => (r.vlanCode || '').trim().toUpperCase() === mandoubVlan || r.mandoubId === mandoub.id
+    const vlanRenewals = allRenewals.filter((r) =>
+      isOrderMatchedToMandoub(r, mandoub, allMandoubs)
     );
     setRenewalRequests(vlanRenewals);
 
@@ -132,17 +146,49 @@ export const MandoubView: React.FC<Props> = ({ mandoub, onLogout }) => {
   };
 
   useEffect(() => {
-    requestNotificationPermission();
-    if (mandoub?.phone) {
-      registerFcmToken(mandoub.phone, 'mandoub', mandoub.vlanCode).catch(() => {});
-      registerPushSubscription(mandoub.phone, 'mandoub', mandoub.vlanCode).catch(() => {});
-    }
+    requestNotificationPermission().catch(() => {});
+    const identifier = mandoub.phone || mandoub.username || mandoub.id;
+    registerFcmToken(identifier, 'mandoub', mandoub.vlanCode).catch(() => {});
+    registerPushSubscription(identifier, 'mandoub', mandoub.vlanCode).catch(() => {});
+
+    const fetchDirectOrders = async () => {
+      try {
+        const res = await fetch(`/api/orders?t=${Date.now()}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Array.isArray(data.orders)) {
+            const currentStr = localStorage.getItem('khobza_orders_v2');
+            const nextStr = JSON.stringify(data.orders);
+            if (currentStr !== nextStr) {
+              localStorage.setItem('khobza_orders_v2', nextStr);
+              loadData();
+            }
+          }
+        }
+      } catch (e) {}
+    };
+
+    // Force instant full sync with cloud server upon opening the view
+    syncWithServer(true).then(() => {
+      fetchDirectOrders();
+      loadData();
+    }).catch(() => {
+      fetchDirectOrders();
+      loadData();
+    });
     loadData();
     handleShareGps();
     const handleStorageChange = () => loadData();
 
+    const handleFocusSync = () => {
+      fetchDirectOrders();
+      syncWithServer(true).then(() => loadData()).catch(() => {});
+    };
+
     window.addEventListener('khobza_data_change', handleStorageChange);
     window.addEventListener('storage', handleStorageChange);
+    window.addEventListener('focus', handleFocusSync);
+    document.addEventListener('visibilitychange', handleFocusSync);
 
     // Continuous watchPosition for Mandoub live GPS location
     let watchId: number | null = null;
@@ -162,9 +208,10 @@ export const MandoubView: React.FC<Props> = ({ mandoub, onLogout }) => {
     }
 
     const interval = setInterval(() => {
-      loadData();
+      fetchDirectOrders();
+      syncWithServer(true).then(() => loadData()).catch(() => loadData());
       handleShareGps();
-    }, 1000);
+    }, 1500);
 
     return () => {
       if (watchId !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
@@ -172,9 +219,11 @@ export const MandoubView: React.FC<Props> = ({ mandoub, onLogout }) => {
       }
       window.removeEventListener('khobza_data_change', handleStorageChange);
       window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('focus', handleFocusSync);
+      document.removeEventListener('visibilitychange', handleFocusSync);
       clearInterval(interval);
     };
-  }, [mandoub.vlanCode]);
+  }, [mandoub.id, mandoub.username, mandoub.phone, mandoub.vlanCode]);
 
   const handleConfirmRenewal = (reqId: string) => {
     confirmRenewalRequestByMandoub(reqId, mandoub);

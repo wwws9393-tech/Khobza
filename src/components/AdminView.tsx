@@ -97,6 +97,14 @@ import {
   sendCloudflarePush,
   setCustomCloudflareWorkerUrl,
 } from '../services/cloudflarePushService';
+import {
+  SUPABASE_SCHEMA_SQL,
+  testSupabaseConnectionDetailed,
+  getSupabaseConfigInfo,
+  fetchAllFromSupabase,
+  pushAllToSupabase,
+  isSupabaseConfigured,
+} from '../services/supabase';
 
 interface Props {
   admin: AdminUser;
@@ -114,7 +122,8 @@ type TabType =
   | 'admins'
   | 'archive'
   | 'updates'
-  | 'notifications';
+  | 'notifications'
+  | 'supabase';
 
 
 export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
@@ -190,6 +199,74 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
   const [cfWorkerUrl, setCfWorkerUrl] = useState<string>(() => getCloudflareWorkerUrl());
   const [cfWorkerSavedMessage, setCfWorkerSavedMessage] = useState<string | null>(null);
 
+  // Supabase Management State
+  const [supabaseTestStatus, setSupabaseTestStatus] = useState<any | null>(null);
+  const [isTestingSupabase, setIsTestingSupabase] = useState(false);
+  const [isSyncingSupabase, setIsSyncingSupabase] = useState(false);
+  const [supabaseSyncMsg, setSupabaseSyncMsg] = useState<string | null>(null);
+  const [copiedSql, setCopiedSql] = useState(false);
+
+  const handleTestSupabase = async () => {
+    setIsTestingSupabase(true);
+    setSupabaseTestStatus(null);
+    try {
+      const res = await testSupabaseConnectionDetailed();
+      setSupabaseTestStatus(res);
+    } catch (err: any) {
+      setSupabaseTestStatus({
+        success: false,
+        error: err?.message || 'خطأ أثناء فحص اتصال Supabase',
+        tables: {},
+      });
+    } finally {
+      setIsTestingSupabase(false);
+    }
+  };
+
+  const handlePushToSupabase = async () => {
+    setIsSyncingSupabase(true);
+    setSupabaseSyncMsg(null);
+    try {
+      const ok = await pushAllToSupabase({
+        families: getFamilies(),
+        mandoubs: getMandoubs(),
+        admins: getAdminAccounts(),
+        orders: getOrders(),
+        renewals: getRenewalRequests(),
+        blockedPhones: getFamilies().filter((f) => f.isBlocked).map((f) => f.phone),
+      });
+      if (ok) {
+        setSupabaseSyncMsg('✅ تم رفع ومزامنة جميع البيانات بنجاح إلى قاعدة بيانات Supabase السحابية!');
+      } else {
+        setSupabaseSyncMsg('⚠️ تعذر الرفع المباشر. يرجى التأكد من تشغيل كود SQL لإنشاء الجداول.');
+      }
+    } catch (err: any) {
+      setSupabaseSyncMsg('خطأ: ' + (err?.message || 'فشلت المزامنة'));
+    } finally {
+      setIsSyncingSupabase(false);
+      setTimeout(() => setSupabaseSyncMsg(null), 5000);
+    }
+  };
+
+  const handlePullFromSupabase = async () => {
+    setIsSyncingSupabase(true);
+    setSupabaseSyncMsg(null);
+    try {
+      const data = await fetchAllFromSupabase();
+      if (data) {
+        loadData();
+        setSupabaseSyncMsg('✅ تم جلب وتحديث جميع الجداول والبيانات من Supabase السحابية بنجاح!');
+      } else {
+        setSupabaseSyncMsg('⚠️ لم يتم العثور على بيانات سحابية أو الجداول فارغة.');
+      }
+    } catch (err: any) {
+      setSupabaseSyncMsg('خطأ: ' + (err?.message || 'فشل الجلب'));
+    } finally {
+      setIsSyncingSupabase(false);
+      setTimeout(() => setSupabaseSyncMsg(null), 5000);
+    }
+  };
+
   const handleSaveCfWorkerUrl = (e: React.FormEvent) => {
     e.preventDefault();
     setCustomCloudflareWorkerUrl(cfWorkerUrl);
@@ -256,13 +333,13 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
     }
   };
 
-  const handleConfirmResetDatabase = (e: React.FormEvent) => {
+  const handleConfirmResetDatabase = async (e: React.FormEvent) => {
     e.preventDefault();
     const code = resetPasscode.trim();
     const adminPasswords = getAdminAccounts().map((a) => a.password);
 
     if (code === 'Hh1234567890' || adminPasswords.includes(code)) {
-      resetDatabaseExceptAdmins();
+      await resetDatabaseExceptAdmins();
       setFamilies([]);
       setMandoubs([]);
       setOrders([]);
@@ -270,7 +347,7 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
       setShowResetModal(false);
       setResetPasscode('');
       setResetError(null);
-      alert('تم تفريغ ومسح جميع بيانات المندوبين، العوائل، وتاريخ الطلبات والأرشيف والإحصائيات بنجاح عدا حسابات الإدارة.');
+      alert('✅ تم تفريغ ومسح جميع بيانات المندوبين، العوائل، وتاريخ الطلبات والأرشيف والإحصائيات بنجاح من قاعدة البيانات عدا حسابات الإدارة.');
     } else {
       setResetError('كلمة سر الأدمن غير صحيحة! يرجى التأكد من كتابة كلمة المرور الخاصة بالأدمن لتأكيد العمل.');
     }
@@ -772,6 +849,18 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
           >
             <Bell className="w-4 h-4 text-amber-500" />
             <span>إدارة الإشعارات وتوكنات FCM 🔔</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('supabase')}
+            className={`px-4 py-2.5 rounded-xl text-xs font-black transition-all flex items-center gap-2 ${
+              activeTab === 'supabase'
+                ? 'bg-emerald-600 text-white shadow-md'
+                : 'text-stone-700 hover:bg-emerald-50'
+            }`}
+          >
+            <Globe className="w-4 h-4 text-emerald-500" />
+            <span>قاعدة بيانات Supabase السحابية ☁️</span>
           </button>
         </div>
       </div>
@@ -2000,6 +2089,24 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
               <button
                 type="button"
                 onClick={() => {
+                  if (window.confirm('هل أنت متأكد من تطبيق نقطة الاسترجاع الآمنة السحابية المعتمدة v1.0.4.final؟ سيتم تحديث وتثبيت الإصدار فوراً وضبط استقرار النظام.')) {
+                    restoreOfficialPointV104Final();
+                    setInstalledVersion('1.0.4');
+                    setVersionInput('1.0.4.final');
+                    setIsMandatoryInput(false);
+                    setReleaseNotesInput('نقطة الاسترجاع السحابية الآمنة المعتمدة v1.0.4.final - استقرار شامل لقاعدة بيانات Supabase، مطابقة الـ VLAN، وتحديثات المندوبين وحسابات الاشتراكات بدون أي خلل.');
+                    setVersionSaveSuccess(true);
+                    alert('✅ تم تطبيق نقطة الاسترجاع الآمنة السحابية المعتمدة بنجاح!');
+                  }
+                }}
+                className="px-4 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+              >
+                <span>نقطة الاسترجاع الآمنة المعتمدة v1.0.4.final 🛡️</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
                   saveAppVersionConfig({
                     currentVersion: '1.0.4',
                     latestVersion: '1.0.4',
@@ -2339,6 +2446,148 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
   "orderId": "order-12345"
 }`}
               </pre>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 13: SUPABASE CLOUD DATABASE MANAGEMENT */}
+      {activeTab === 'supabase' && (
+        <div className="space-y-6 text-right animate-fadeIn">
+          {/* Header Banner */}
+          <div className="bg-gradient-to-r from-emerald-800 via-teal-700 to-emerald-900 rounded-3xl p-6 text-white shadow-lg space-y-2">
+            <div className="flex items-center gap-3">
+              <div className="p-3 bg-white/20 rounded-2xl backdrop-blur-xs">
+                <Globe className="w-7 h-7 text-white" />
+              </div>
+              <div>
+                <h3 className="text-xl font-black">إدارة قاعدة بيانات Supabase السحابية الكاملة ☁️</h3>
+                <p className="text-xs text-emerald-100 font-medium">
+                  ربط ومزامنة كافة جداول العوائل، المندوبين، المدراء، الطلبات، والاشتراكات سحابياً دون أي اعتماد على التخزين المحلي.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Connection Status Card */}
+          <div className="bg-white rounded-3xl p-6 shadow-xs border border-stone-200 space-y-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-stone-100 pb-4">
+              <div className="flex items-center gap-2">
+                <div className={`w-3.5 h-3.5 rounded-full ${isSupabaseConfigured() ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                <h4 className="text-base font-black text-stone-900">
+                  حالة الاتصال بـ Supabase: {isSupabaseConfigured() ? '✅ متصل ومُهيأ سحابياً' : '⚠️ قيد التهيئة'}
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={handleTestSupabase}
+                disabled={isTestingSupabase}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-black text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 active:scale-95"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isTestingSupabase ? 'animate-spin' : ''}`} />
+                <span>{isTestingSupabase ? 'جارِ فحص الجداول...' : 'فحص واختبار جداول Supabase الآن ⚡'}</span>
+              </button>
+            </div>
+
+            {/* Test Results Breakdown */}
+            {supabaseTestStatus && (
+              <div className={`p-4 rounded-2xl border ${supabaseTestStatus.success ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'} space-y-3`}>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-black text-stone-900">
+                    {supabaseTestStatus.success ? '✅ تم الاتصال بنجاح بقاعدة بيانات Supabase' : '⚠️ تم فحص الاتصال مع ملاحظات:'}
+                  </span>
+                  {supabaseTestStatus.error && (
+                    <span className="text-[11px] text-red-600 font-mono font-bold">{supabaseTestStatus.error}</span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2">
+                  {Object.entries(supabaseTestStatus.tables || {}).map(([tbl, ok]: [string, any]) => (
+                    <div
+                      key={tbl}
+                      className={`p-2.5 rounded-xl border text-center font-mono text-xs flex items-center justify-between ${
+                        ok ? 'bg-white border-emerald-300 text-emerald-800 font-bold' : 'bg-red-50 border-red-200 text-red-700'
+                      }`}
+                    >
+                      <span className="text-stone-700">{tbl}:</span>
+                      <span>{ok ? 'متصل ✅' : 'غير متوفر ❌'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Direct Sync & Migration Action Buttons */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+              <button
+                type="button"
+                onClick={handlePushToSupabase}
+                disabled={isSyncingSupabase}
+                className="py-3.5 px-4 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-black text-xs rounded-2xl shadow-md transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
+              >
+                <Send className="w-4 h-4" />
+                <span>{isSyncingSupabase ? 'جارِ المزامنة...' : 'رفع ومزامنة جميع البيانات إلى Supabase الآن 🚀'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handlePullFromSupabase}
+                disabled={isSyncingSupabase}
+                className="py-3.5 px-4 bg-stone-800 hover:bg-stone-900 text-white font-black text-xs rounded-2xl shadow-md transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
+              >
+                <Download className="w-4 h-4" />
+                <span>{isSyncingSupabase ? 'جارِ السحب...' : 'سحب وتحديث البيانات من Supabase السحابية 📥'}</span>
+              </button>
+            </div>
+
+            {supabaseSyncMsg && (
+              <div className="p-3.5 bg-emerald-100 border border-emerald-300 text-emerald-950 font-bold text-xs rounded-xl flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{supabaseSyncMsg}</span>
+              </div>
+            )}
+          </div>
+
+          {/* SQL Schema Generation and Copy Card */}
+          <div className="bg-stone-900 text-stone-100 rounded-3xl p-6 shadow-md space-y-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-stone-800 pb-3">
+              <div className="flex items-center gap-2">
+                <FileJson className="w-5 h-5 text-emerald-400" />
+                <div>
+                  <h4 className="text-sm font-black text-emerald-400">
+                    كود SQL الشامل لإنشاء جميع جداول تطبيق خبزة في Supabase 📜
+                  </h4>
+                  <p className="text-xs text-stone-400 mt-0.5">
+                    انسخ الكود بالكامل، افتح لوحة Supabase الخاصة بك، اذهب إلى <strong>SQL Editor</strong>، الصق الكود واضغط <strong>Run</strong>.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(SUPABASE_SCHEMA_SQL);
+                  setCopiedSql(true);
+                  setTimeout(() => setCopiedSql(false), 2500);
+                }}
+                className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 shrink-0"
+              >
+                {copiedSql ? (
+                  <>
+                    <Check className="w-4 h-4 text-white" />
+                    <span>تم النسخ بنجاح! 📋</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-4 h-4" />
+                    <span>نسخ كود SQL بالكامل 📋</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="bg-stone-950 p-4 rounded-2xl border border-stone-800 font-mono text-[11px] text-emerald-300 max-h-96 overflow-y-auto space-y-1" dir="ltr">
+              <pre className="text-stone-200 whitespace-pre-wrap">{SUPABASE_SCHEMA_SQL}</pre>
             </div>
           </div>
         </div>

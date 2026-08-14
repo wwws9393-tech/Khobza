@@ -28,6 +28,19 @@ function urlBase64ToUint8Array(base64String: string) {
   return outputArray;
 }
 
+export async function fetchVapidPublicKey(): Promise<string> {
+  try {
+    const res = await fetch('/api/push/vapid-public-key');
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.publicKey) {
+        return data.publicKey;
+      }
+    }
+  } catch (e) {}
+  return VAPID_PUBLIC_KEY;
+}
+
 // Register service worker and subscribe to real Web Push
 export async function registerPushSubscription(
   userPhone?: string,
@@ -40,13 +53,27 @@ export async function registerPushSubscription(
   }
 
   try {
+    // Check and request notification permission if not yet granted
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      try {
+        await Notification.requestPermission();
+      } catch (e) {}
+    }
+
+    if (typeof Notification !== 'undefined' && Notification.permission !== 'granted') {
+      console.warn('Notification permission not granted for push subscription');
+      return null;
+    }
+
     const registration = await navigator.serviceWorker.ready;
     let subscription = await registration.pushManager.getSubscription();
+
+    const activeVapidKey = await fetchVapidPublicKey();
 
     if (!subscription) {
       // Subscribe to Push
       try {
-        const convertedKey = urlBase64ToUint8Array(VAPID_PUBLIC_KEY);
+        const convertedKey = urlBase64ToUint8Array(activeVapidKey);
         subscription = await registration.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: convertedKey,
@@ -132,8 +159,16 @@ export async function broadcastExternalPush(payload: {
       body: JSON.stringify(payload),
     }).catch(() => {});
 
-    // 2. Direct Service Worker PostMessage wake-up if in same client context
-    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+    // 2. Direct Service Worker PostMessage wake-up ONLY if recipient matches this device
+    const session = getSavedSession();
+    const isTargetMatch =
+      !payload.targetRole ||
+      payload.targetRole === 'all' ||
+      (payload.targetRole === 'mandoub' && session.role === 'mandoub') ||
+      (payload.targetRole === 'family' && session.role === 'customer') ||
+      (payload.targetRole === 'admin' && session.role === 'admin');
+
+    if (isTargetMatch && 'serviceWorker' in navigator && navigator.serviceWorker.controller) {
       navigator.serviceWorker.controller.postMessage({
         type: 'SHOW_NOTIFICATION',
         title: payload.title,

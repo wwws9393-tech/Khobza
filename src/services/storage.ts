@@ -26,6 +26,23 @@ import {
   isSupabaseConfigured,
   fetchAllFromSupabase,
   pushAllToSupabase,
+  fetchFamilyByPhoneFromSupabase,
+  upsertFamilyToSupabase,
+  deleteFamilyFromSupabase,
+  updateFamilyLocationInSupabase,
+  upsertMandoubToSupabase,
+  deleteMandoubFromSupabase,
+  updateMandoubLocationInSupabase,
+  upsertOrderToSupabase,
+  deleteOrderFromSupabase,
+  upsertRenewalToSupabase,
+  upsertAdminToSupabase,
+  deleteAdminFromSupabase,
+  upsertBlockedPhoneToSupabase,
+  deleteBlockedPhoneFromSupabase,
+  clearAllSupabaseTables,
+  saveVersionConfigToSupabase,
+  subscribeToSupabaseRealtime,
 } from './supabase';
 import { broadcastExternalPush } from './pushService';
 
@@ -38,6 +55,98 @@ const KEYS = {
   SESSION: 'khobza_session_v2',
   RENEWALS: 'khobza_renewals_v2',
 };
+
+// Universal VLAN & Area Normalization Helper
+export function normalizeVlanCode(code: string | undefined | null): string {
+  if (!code) return '';
+  return normalizeDigits(String(code))
+    .trim()
+    .toUpperCase()
+    .replace(/[\s\-_/\\,.]+/g, '');
+}
+
+export function isVlanMatching(
+  vlanA: string | undefined | null,
+  vlanB: string | undefined | null
+): boolean {
+  if (!vlanA || !vlanB) return false;
+  const rawA = normalizeDigits(String(vlanA)).trim().toLowerCase();
+  const rawB = normalizeDigits(String(vlanB)).trim().toLowerCase();
+  if (rawA === rawB) return true;
+
+  // Remove whitespace and separators
+  const cleanA = rawA.replace(/[\s\-_/\\,.]+/g, '');
+  const cleanB = rawB.replace(/[\s\-_/\\,.]+/g, '');
+  if (cleanA === cleanB) return true;
+
+  // Extract digits for numeric matching (e.g. "101" vs "VLAN101" or "الكرادة 101")
+  const digitsA = rawA.replace(/\D/g, '');
+  const digitsB = rawB.replace(/\D/g, '');
+  if (digitsA && digitsB) {
+    if (digitsA === digitsB) return true;
+    if (cleanA.endsWith(digitsB) || cleanB.endsWith(digitsA)) return true;
+  }
+
+  // Remove common prefixes
+  const simplify = (s: string) =>
+    s
+      .replace(/^vlan/i, '')
+      .replace(/^منطقة\s*/i, '')
+      .replace(/^حي\s*/i, '')
+      .replace(/^مكتب\s*/i, '')
+      .replace(/[\s\-_/\\,.]+/g, '')
+      .trim();
+
+  const simpA = simplify(rawA);
+  const simpB = simplify(rawB);
+  if (simpA && simpB && simpA === simpB) return true;
+
+  // Substring matching for descriptive area / vlan names
+  if (simpA.length >= 3 && simpB.length >= 3) {
+    if (simpA.includes(simpB) || simpB.includes(simpA)) return true;
+  }
+  if (cleanA.length >= 3 && cleanB.length >= 3) {
+    if (cleanA.includes(cleanB) || cleanB.includes(cleanA)) return true;
+  }
+
+  return false;
+}
+
+// Universal matcher for Orders and Renewal Requests to Mandoub
+export function isOrderMatchedToMandoub(
+  order: { vlanCode?: string; areaName?: string; mandoubId?: string; mandoubName?: string },
+  mandoub: Mandoub,
+  allMandoubs?: Mandoub[]
+): boolean {
+  if (!mandoub) return false;
+
+  // 1. Explicit ID match
+  if (order.mandoubId && order.mandoubId === mandoub.id) return true;
+
+  // 2. Explicit name match
+  if (order.mandoubName && mandoub.name && order.mandoubName.trim() === mandoub.name.trim()) return true;
+
+  // 3. Single active mandoub in system -> receives all orders
+  const activeMandoubs = (allMandoubs || getMandoubs()).filter((m) => !m.status || m.status === 'active');
+  if (activeMandoubs.length <= 1) return true;
+
+  // 4. VLAN Code match
+  if (isVlanMatching(order.vlanCode, mandoub.vlanCode)) return true;
+
+  // 5. Area Name match
+  if (isVlanMatching(order.areaName, mandoub.areaName)) return true;
+
+  // 6. Cross VLAN / Area match (e.g. order.vlanCode matches mandoub.areaName or order.areaName matches mandoub.vlanCode)
+  if (isVlanMatching(order.vlanCode, mandoub.areaName)) return true;
+  if (isVlanMatching(order.areaName, mandoub.vlanCode)) return true;
+
+  // 7. If order is not explicitly assigned to another mandoub, allow active mandoubs in default/unassigned coverage
+  if (!order.mandoubId && (!order.vlanCode || order.vlanCode === 'vlan1' || !mandoub.vlanCode)) {
+    return true;
+  }
+
+  return false;
+}
 
 // Helper: safe JSON parse
 function getStorage<T>(key: string, fallback: T): T {
@@ -65,7 +174,6 @@ function mergeArraysById<T extends { id: string }>(arr1: T[], arr2: T[]): T[] {
           const existingTime = (existing as any).updatedAt || (existing as any).createdAt || '';
           const itemTime = (item as any).updatedAt || (item as any).createdAt || '';
           
-          // Helper status weights for orders
           const getStatusWeight = (st: string) => {
             if (st === 'completed_confirmed' || st === 'unpaid_confirmed') return 5;
             if (st === 'processing_unpaid') return 4;
@@ -103,6 +211,15 @@ export function normalizeDigits(str: string): string {
     .trim();
 }
 
+export function normalizeIraqiPhone(raw: string): string {
+  if (!raw) return '';
+  let d = normalizeDigits(raw).replace(/\D/g, '');
+  if (d.startsWith('00964')) d = d.slice(5);
+  if (d.startsWith('964')) d = d.slice(3);
+  if (d.length === 10 && d.startsWith('7')) d = '0' + d;
+  return d;
+}
+
 let lastMutationTime = 0;
 
 export async function pushToServer(action: 'merge' | 'overwrite' | 'admin_reset' = 'merge'): Promise<void> {
@@ -127,7 +244,11 @@ export async function pushToServer(action: 'merge' | 'overwrite' | 'admin_reset'
 
     // 1. Push to Supabase if configured
     if (isSupabaseConfigured()) {
-      pushAllToSupabase({ families, mandoubs, admins, orders, renewals, blockedPhones }).catch(() => {});
+      if (action === 'admin_reset') {
+        clearAllSupabaseTables().catch(() => {});
+      } else {
+        pushAllToSupabase({ families, mandoubs, admins, orders, renewals, blockedPhones }).catch(() => {});
+      }
     }
 
     // 2. Push to local Express DB
@@ -143,8 +264,8 @@ export async function pushToServer(action: 'merge' | 'overwrite' | 'admin_reset'
 }
 
 export async function syncWithServer(force = false): Promise<void> {
-  // Rapid sync settling - wait 2000ms after a local mutation to allow pushToServer to settle unless forced
-  if (!force && Date.now() - lastMutationTime < 2000) {
+  // Rapid sync settling - wait 1500ms after a local mutation to allow pushToServer to settle unless forced
+  if (!force && Date.now() - lastMutationTime < 1500) {
     return;
   }
 
@@ -154,29 +275,53 @@ export async function syncWithServer(force = false): Promise<void> {
       const supaData = await fetchAllFromSupabase();
       if (supaData) {
         let changed = false;
-        if (supaData.families) {
-          localStorage.setItem(KEYS.FAMILIES, JSON.stringify(supaData.families));
-          changed = true;
+        if (Array.isArray(supaData.families)) {
+          const current = localStorage.getItem(KEYS.FAMILIES);
+          const next = JSON.stringify(supaData.families);
+          if (current !== next) {
+            localStorage.setItem(KEYS.FAMILIES, next);
+            changed = true;
+          }
         }
-        if (supaData.mandoubs) {
-          localStorage.setItem(KEYS.MANDOUBS, JSON.stringify(supaData.mandoubs));
-          changed = true;
+        if (Array.isArray(supaData.mandoubs)) {
+          const current = localStorage.getItem(KEYS.MANDOUBS);
+          const next = JSON.stringify(supaData.mandoubs);
+          if (current !== next) {
+            localStorage.setItem(KEYS.MANDOUBS, next);
+            changed = true;
+          }
         }
-        if (supaData.orders) {
-          localStorage.setItem(KEYS.ORDERS, JSON.stringify(supaData.orders));
-          changed = true;
+        if (Array.isArray(supaData.orders)) {
+          const current = localStorage.getItem(KEYS.ORDERS);
+          const next = JSON.stringify(supaData.orders);
+          if (current !== next) {
+            localStorage.setItem(KEYS.ORDERS, next);
+            changed = true;
+          }
         }
-        if (supaData.renewals) {
-          localStorage.setItem(KEYS.RENEWALS, JSON.stringify(supaData.renewals));
-          changed = true;
+        if (Array.isArray(supaData.renewals)) {
+          const current = localStorage.getItem(KEYS.RENEWALS);
+          const next = JSON.stringify(supaData.renewals);
+          if (current !== next) {
+            localStorage.setItem(KEYS.RENEWALS, next);
+            changed = true;
+          }
         }
-        if (supaData.admins && supaData.admins.length > 0) {
-          localStorage.setItem(KEYS.ADMINS, JSON.stringify(supaData.admins));
-          changed = true;
+        if (Array.isArray(supaData.admins) && supaData.admins.length > 0) {
+          const current = localStorage.getItem(KEYS.ADMINS);
+          const next = JSON.stringify(supaData.admins);
+          if (current !== next) {
+            localStorage.setItem(KEYS.ADMINS, next);
+            changed = true;
+          }
         }
-        if (supaData.blockedPhones) {
-          localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify(supaData.blockedPhones));
-          changed = true;
+        if (Array.isArray(supaData.blockedPhones)) {
+          const current = localStorage.getItem(KEYS.BLOCKED_PHONES);
+          const next = JSON.stringify(supaData.blockedPhones);
+          if (current !== next) {
+            localStorage.setItem(KEYS.BLOCKED_PHONES, next);
+            changed = true;
+          }
         }
         if (changed) {
           window.dispatchEvent(new Event('khobza_data_change'));
@@ -194,25 +339,20 @@ export async function syncWithServer(force = false): Promise<void> {
     if (data && typeof data === 'object') {
       let changed = false;
 
-      // Sync families
+      // Sync families (authoritative server list)
       if (Array.isArray(data.families)) {
-        const localFamilies = getStorage<Family[]>(KEYS.FAMILIES, []);
-        // Merge without losing locally added families
-        const mergedFamilies = mergeArraysById(localFamilies, data.families);
-        const mergedStr = JSON.stringify(mergedFamilies);
-        if (mergedStr !== localStorage.getItem(KEYS.FAMILIES)) {
-          localStorage.setItem(KEYS.FAMILIES, mergedStr);
+        const serverStr = JSON.stringify(data.families);
+        if (serverStr !== localStorage.getItem(KEYS.FAMILIES)) {
+          localStorage.setItem(KEYS.FAMILIES, serverStr);
           changed = true;
         }
       }
 
-      // Sync mandoubs
+      // Sync mandoubs (authoritative server list)
       if (Array.isArray(data.mandoubs)) {
-        const localMandoubs = getStorage<Mandoub[]>(KEYS.MANDOUBS, []);
-        const mergedMandoubs = mergeArraysById(localMandoubs, data.mandoubs);
-        const mergedStr = JSON.stringify(mergedMandoubs);
-        if (mergedStr !== localStorage.getItem(KEYS.MANDOUBS)) {
-          localStorage.setItem(KEYS.MANDOUBS, mergedStr);
+        const serverStr = JSON.stringify(data.mandoubs);
+        if (serverStr !== localStorage.getItem(KEYS.MANDOUBS)) {
+          localStorage.setItem(KEYS.MANDOUBS, serverStr);
           changed = true;
         }
       }
@@ -226,13 +366,11 @@ export async function syncWithServer(force = false): Promise<void> {
         }
       }
 
-      // Sync orders
+      // Sync orders (authoritative server list)
       if (Array.isArray(data.orders)) {
-        const localOrders = getStorage<Order[]>(KEYS.ORDERS, []);
-        const mergedOrders = mergeArraysById(localOrders, data.orders);
-        const mergedStr = JSON.stringify(mergedOrders);
-        if (mergedStr !== localStorage.getItem(KEYS.ORDERS)) {
-          localStorage.setItem(KEYS.ORDERS, mergedStr);
+        const serverStr = JSON.stringify(data.orders);
+        if (serverStr !== localStorage.getItem(KEYS.ORDERS)) {
+          localStorage.setItem(KEYS.ORDERS, serverStr);
           changed = true;
         }
       }
@@ -276,38 +414,225 @@ function setStorage<T>(key: string, value: T, action: 'merge' | 'overwrite' | 'a
 }
 
 let autoSyncInterval: any = null;
+let realtimeUnsubscribe: (() => void) | null = null;
+let sseConnection: EventSource | null = null;
 
-// Initialize seed data if empty and sync with cloud backend
+// Verify whether the currently active logged-in session is still valid in the cloud database
+export function verifyCurrentActiveSession(): { valid: boolean; reason?: string } {
+  const session = getSavedSession();
+  if (session.role === 'guest') {
+    return { valid: true };
+  }
+
+  if (session.role === 'customer') {
+    const families = getFamilies();
+    const fam = families.find((f) => f.phone === session.phone || (session.familyId && f.id === session.familyId));
+    if (!fam) {
+      clearSession();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('khobza_session_terminated', { detail: { reason: 'account_deleted' } }));
+      }
+      return { valid: false, reason: 'حساب العائلة غير مسجل أو تم حذفه من قبل الإدارة' };
+    }
+    if (fam.isBlocked) {
+      clearSession();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('khobza_session_terminated', { detail: { reason: 'account_blocked' } }));
+      }
+      return { valid: false, reason: 'تم حظر حساب العائلة من قبل الإدارة' };
+    }
+    return { valid: true };
+  }
+
+  if (session.role === 'mandoub') {
+    const mandoubs = getMandoubs();
+    const mandoub = mandoubs.find((m) => m.id === session.mandoubId);
+    if (!mandoub) {
+      clearSession();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('khobza_session_terminated', { detail: { reason: 'account_deleted' } }));
+      }
+      return { valid: false, reason: 'حساب المندوب غير مسجل أو تم حذفه من قبل الإدارة' };
+    }
+    if (mandoub.status === 'disabled' || mandoub.status === 'inactive') {
+      clearSession();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('khobza_session_terminated', { detail: { reason: 'account_disabled' } }));
+      }
+      return { valid: false, reason: 'تم تعطيل حساب المندوب من قبل الإدارة' };
+    }
+    return { valid: true };
+  }
+
+  if (session.role === 'admin') {
+    const admins = getAdminAccounts();
+    const admin = admins.find((a) => a.id === session.adminId);
+    if (!admin && admins.length > 0 && session.adminId !== 'admin-main') {
+      clearSession();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('khobza_session_terminated', { detail: { reason: 'account_deleted' } }));
+      }
+      return { valid: false, reason: 'حساب المشرف غير موجود' };
+    }
+    return { valid: true };
+  }
+
+  return { valid: true };
+}
+
+// Initialize data and sync with cloud backend
 export function initializeAppData(): void {
-  // Safe local initialization without sending destructive empty overwrite to server
+  // Never populate client-side dummy accounts if key is missing; keep clean empty arrays
   if (localStorage.getItem(KEYS.FAMILIES) === null) {
-    localStorage.setItem(KEYS.FAMILIES, JSON.stringify(INITIAL_FAMILIES));
+    localStorage.setItem(KEYS.FAMILIES, JSON.stringify([]));
   }
   if (localStorage.getItem(KEYS.MANDOUBS) === null) {
-    localStorage.setItem(KEYS.MANDOUBS, JSON.stringify(INITIAL_MANDOUBS));
+    localStorage.setItem(KEYS.MANDOUBS, JSON.stringify([]));
   }
   if (localStorage.getItem(KEYS.ADMINS) === null) {
     localStorage.setItem(KEYS.ADMINS, JSON.stringify(INITIAL_ADMINS));
   }
   if (localStorage.getItem(KEYS.ORDERS) === null) {
-    localStorage.setItem(KEYS.ORDERS, JSON.stringify(INITIAL_ORDERS));
+    localStorage.setItem(KEYS.ORDERS, JSON.stringify([]));
   }
   if (localStorage.getItem(KEYS.BLOCKED_PHONES) === null) {
-    localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify(INITIAL_BLOCKED_PHONES));
+    localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify([]));
   }
 
   // Trigger sync with server database immediately
-  syncWithServer();
+  syncWithServer(true);
+
+  // Connect to SSE stream for zero-delay instant synchronization across all devices
+  if (typeof window !== 'undefined' && 'EventSource' in window && !sseConnection) {
+    try {
+      const sse = new EventSource('/api/events');
+      sseConnection = sse;
+      sse.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'DB_MUTATION' || data.type === 'NOTIFICATION_PUSH') {
+            // Instant handling for Admin Reset
+            if (data.action === 'admin_reset') {
+              localStorage.setItem(KEYS.FAMILIES, JSON.stringify([]));
+              localStorage.setItem(KEYS.MANDOUBS, JSON.stringify([]));
+              localStorage.setItem(KEYS.ORDERS, JSON.stringify([]));
+              localStorage.setItem(KEYS.RENEWALS, JSON.stringify([]));
+              localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify([]));
+              const currentSession = getSavedSession();
+              if (currentSession.role !== 'admin') {
+                clearSession();
+                window.dispatchEvent(new CustomEvent('khobza_session_terminated', { detail: { reason: 'admin_reset' } }));
+              }
+              window.dispatchEvent(new Event('khobza_data_change'));
+              return;
+            }
+
+            // Instant handling for Family Deletion
+            if (data.entity === 'families' && data.action === 'delete') {
+              const localFamilies = getFamilies().filter((f) => f.id !== data.id && f.phone !== data.phone);
+              localStorage.setItem(KEYS.FAMILIES, JSON.stringify(localFamilies));
+              const currentSession = getSavedSession();
+              if (currentSession.role === 'customer') {
+                if (data.id === currentSession.familyId || data.phone === currentSession.phone || !localFamilies.some(f => f.phone === currentSession.phone)) {
+                  clearSession();
+                  window.dispatchEvent(new CustomEvent('khobza_session_terminated', { detail: { reason: 'account_deleted' } }));
+                }
+              }
+              window.dispatchEvent(new Event('khobza_data_change'));
+            }
+
+            // Instant handling for Mandoub Deletion
+            if (data.entity === 'mandoubs' && data.action === 'delete') {
+              const localMandoubs = getMandoubs().filter((m) => m.id !== data.id && m.username !== data.username);
+              localStorage.setItem(KEYS.MANDOUBS, JSON.stringify(localMandoubs));
+              const currentSession = getSavedSession();
+              if (currentSession.role === 'mandoub') {
+                if (data.id === currentSession.mandoubId || !localMandoubs.some(m => m.id === currentSession.mandoubId)) {
+                  clearSession();
+                  window.dispatchEvent(new CustomEvent('khobza_session_terminated', { detail: { reason: 'account_deleted' } }));
+                }
+              }
+              window.dispatchEvent(new Event('khobza_data_change'));
+            }
+
+            // Apply immediate delta for save
+            if (data.entity === 'families' && data.action === 'save' && data.family) {
+              const localFamilies = getFamilies();
+              const idx = localFamilies.findIndex((f) => f.id === data.family.id || f.phone === data.family.phone);
+              if (idx >= 0) {
+                localFamilies[idx] = { ...localFamilies[idx], ...data.family };
+              } else {
+                localFamilies.push(data.family);
+              }
+              localStorage.setItem(KEYS.FAMILIES, JSON.stringify(localFamilies));
+              window.dispatchEvent(new Event('khobza_data_change'));
+            } else if (data.entity === 'mandoubs' && data.action === 'save' && data.mandoub) {
+              const localMandoubs = getMandoubs();
+              const idx = localMandoubs.findIndex((m) => m.id === data.mandoub.id || m.username === data.mandoub.username);
+              if (idx >= 0) {
+                localMandoubs[idx] = { ...localMandoubs[idx], ...data.mandoub };
+              } else {
+                localMandoubs.push(data.mandoub);
+              }
+              localStorage.setItem(KEYS.MANDOUBS, JSON.stringify(localMandoubs));
+              window.dispatchEvent(new Event('khobza_data_change'));
+            } else if (data.entity === 'orders' && (data.action === 'save' || data.action === 'status_update') && data.order) {
+              const localOrders = getOrders();
+              const idx = localOrders.findIndex((o) => o.id === data.order.id);
+              if (idx >= 0) {
+                localOrders[idx] = { ...localOrders[idx], ...data.order };
+              } else {
+                localOrders.unshift(data.order);
+              }
+              localStorage.setItem(KEYS.ORDERS, JSON.stringify(localOrders));
+              window.dispatchEvent(new Event('khobza_data_change'));
+            } else if (data.entity === 'orders' && data.action === 'delete') {
+              const localOrders = getOrders().filter((o) => o.id !== data.id);
+              localStorage.setItem(KEYS.ORDERS, JSON.stringify(localOrders));
+              window.dispatchEvent(new Event('khobza_data_change'));
+            } else if (data.entity === 'renewals' && data.action === 'save' && data.renewal) {
+              const localRenewals = getRenewalRequests();
+              const idx = localRenewals.findIndex((r) => r.id === data.renewal.id);
+              if (idx >= 0) {
+                localRenewals[idx] = { ...localRenewals[idx], ...data.renewal };
+              } else {
+                localRenewals.unshift(data.renewal);
+              }
+              localStorage.setItem(KEYS.RENEWALS, JSON.stringify(localRenewals));
+              window.dispatchEvent(new Event('khobza_data_change'));
+            } else if (data.entity === 'renewals' && data.action === 'delete') {
+              const localRenewals = getRenewalRequests().filter((r) => r.id !== data.id);
+              localStorage.setItem(KEYS.RENEWALS, JSON.stringify(localRenewals));
+              window.dispatchEvent(new Event('khobza_data_change'));
+            }
+
+            syncWithServer(true);
+          }
+        } catch (e) {}
+      };
+      sse.onerror = () => {
+        // SSE handles reconnection automatically
+      };
+    } catch (e) {}
+  }
+
+  // Subscribe to Supabase realtime changes
+  if (!realtimeUnsubscribe && isSupabaseConfigured()) {
+    realtimeUnsubscribe = subscribeToSupabaseRealtime(() => {
+      syncWithServer(true);
+    });
+  }
 
   if (!autoSyncInterval && typeof window !== 'undefined') {
     autoSyncInterval = setInterval(() => {
       syncWithServer();
-    }, 2500);
+      verifyCurrentActiveSession();
+    }, 2000);
   }
 }
 
-// Reset ALL data (families, mandoubs, orders, renewals, history) except Admins
-export function resetDatabaseExceptAdmins(): void {
+// Reset ALL data (families, mandoubs, orders, renewals, history, blocked phones) except Admins
+export async function resetDatabaseExceptAdmins(): Promise<void> {
   localStorage.setItem(KEYS.FAMILIES, JSON.stringify([]));
   localStorage.setItem(KEYS.MANDOUBS, JSON.stringify([]));
   localStorage.setItem(KEYS.RENEWALS, JSON.stringify([]));
@@ -320,38 +645,56 @@ export function resetDatabaseExceptAdmins(): void {
     clearSession();
   }
 
+  // Clear Supabase tables directly
+  if (isSupabaseConfigured()) {
+    try {
+      await clearAllSupabaseTables();
+    } catch (err) {
+      console.warn('Supabase tables clear warning:', err);
+    }
+  }
+
   // Notify backend with explicit admin_reset action
   if (typeof fetch !== 'undefined') {
-    fetch('/api/db/reset', { method: 'POST' }).catch(() => {});
+    try {
+      await fetch('/api/db/reset', { method: 'POST' });
+    } catch (err) {
+      console.warn('Server reset endpoint fetch warning:', err);
+    }
   }
 
   pushToServer('admin_reset');
-
   window.dispatchEvent(new Event('khobza_data_change'));
 }
 
+// Safe Official Stable Checkpoint Definition
+export const SAFE_CHECKPOINT_V104 = {
+  restorePointName: 'نقطة الاسترجاع الآمنة السحابية المعتمدة v1.0.4.final',
+  appName: 'Khobza Cloud Safe Checkpoint',
+  version: '1.0.4',
+  isOfficial: true,
+  createdAt: new Date().toISOString(),
+  admins: INITIAL_ADMINS,
+  versionConfig: {
+    currentVersion: '1.0.4',
+    latestVersion: '1.0.4',
+    isMandatory: false,
+    releaseNotes: 'نقطة الاسترجاع السحابية الآمنة المعتمدة v1.0.4.final - استقرار شامل لقاعدة بيانات Supabase، مطابقة الـ VLAN، وتحديثات المندوبين وحسابات الاشتراكات بدون أي خلل.',
+    releasedAt: new Date().toISOString(),
+  },
+};
 
 // Restore Official Stable Checkpoint v1.0.4.final
 export function restoreOfficialPointV104Final(): boolean {
   try {
     const checkpoint = {
-      restorePointName: 'v1.0.4.final',
-      appName: 'Khobza Official Final Restore Point',
-      version: '1.0.4',
-      createdAt: new Date().toISOString(),
       families: [],
       mandoubs: [],
-      admins: getAdminAccounts(),
+      admins: getAdminAccounts().length > 0 ? getAdminAccounts() : INITIAL_ADMINS,
       orders: [],
       renewals: [],
       blockedPhones: [],
-      versionConfig: {
-        currentVersion: '1.0.4',
-        latestVersion: '1.0.4',
-        isMandatory: false,
-        releaseNotes: 'الإصدار الرسمي النهائى المستقر وآمن v1.0.4.final - تم تحديث واستقرار نظام إدارة الخبزة وتصفيات الحسابات واللوحة الذكية',
-        releasedAt: new Date().toISOString(),
-      },
+      versionConfig: SAFE_CHECKPOINT_V104.versionConfig,
     };
 
     localStorage.setItem(KEYS.FAMILIES, JSON.stringify(checkpoint.families));
@@ -359,10 +702,12 @@ export function restoreOfficialPointV104Final(): boolean {
     localStorage.setItem(KEYS.ORDERS, JSON.stringify(checkpoint.orders));
     localStorage.setItem(KEYS.RENEWALS, JSON.stringify(checkpoint.renewals));
     localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify(checkpoint.blockedPhones));
-    localStorage.setItem(
-      'khobza_version_config_v1',
-      JSON.stringify(checkpoint.versionConfig)
-    );
+    localStorage.setItem('khobza_version_config_v1', JSON.stringify(checkpoint.versionConfig));
+
+    if (isSupabaseConfigured()) {
+      clearAllSupabaseTables().catch(() => {});
+      saveVersionConfigToSupabase(checkpoint.versionConfig).catch(() => {});
+    }
 
     pushToServer('overwrite');
     if (typeof fetch !== 'undefined') {
@@ -378,16 +723,15 @@ export function restoreOfficialPointV104Final(): boolean {
   }
 }
 
-// Restore Official Stable Checkpoint v1.0.4.screen
 export function restoreOfficialPointV104Screen(): boolean {
   return restoreOfficialPointV104Final();
 }
 
-// Export complete database backup as JSON
+// Export complete database backup as JSON (from local & cloud)
 export function exportDatabaseJSON(): string {
   const data = {
-    appName: 'Khobza App Backup',
-    version: '2.0.0',
+    appName: 'Khobza App Cloud Backup',
+    version: '2.1.0',
     exportedAt: new Date().toISOString(),
     families: getStorage(KEYS.FAMILIES, []),
     mandoubs: getStorage(KEYS.MANDOUBS, []),
@@ -400,35 +744,44 @@ export function exportDatabaseJSON(): string {
   return JSON.stringify(data, null, 2);
 }
 
-// Import database backup from JSON
+// Import database backup from JSON and restore to local & Supabase Cloud
 export function importDatabaseJSON(jsonStr: string): boolean {
   try {
     const data = JSON.parse(jsonStr);
     if (!data || typeof data !== 'object') return false;
 
-    if (Array.isArray(data.families)) {
-      localStorage.setItem(KEYS.FAMILIES, JSON.stringify(data.families));
-    }
-    if (Array.isArray(data.mandoubs)) {
-      localStorage.setItem(KEYS.MANDOUBS, JSON.stringify(data.mandoubs));
-    }
-    if (Array.isArray(data.admins) && data.admins.length > 0) {
-      localStorage.setItem(KEYS.ADMINS, JSON.stringify(data.admins));
-    }
-    if (Array.isArray(data.orders)) {
-      localStorage.setItem(KEYS.ORDERS, JSON.stringify(data.orders));
-    }
-    if (Array.isArray(data.renewals)) {
-      localStorage.setItem(KEYS.RENEWALS, JSON.stringify(data.renewals));
-    }
-    if (Array.isArray(data.blockedPhones)) {
-      localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify(data.blockedPhones));
-    }
+    const families = Array.isArray(data.families) ? data.families : [];
+    const mandoubs = Array.isArray(data.mandoubs) ? data.mandoubs : [];
+    const admins = Array.isArray(data.admins) && data.admins.length > 0 ? data.admins : getAdminAccounts();
+    const orders = Array.isArray(data.orders) ? data.orders : [];
+    const renewals = Array.isArray(data.renewals) ? data.renewals : [];
+    const blockedPhones = Array.isArray(data.blockedPhones) ? data.blockedPhones : [];
+
+    localStorage.setItem(KEYS.FAMILIES, JSON.stringify(families));
+    localStorage.setItem(KEYS.MANDOUBS, JSON.stringify(mandoubs));
+    localStorage.setItem(KEYS.ADMINS, JSON.stringify(admins));
+    localStorage.setItem(KEYS.ORDERS, JSON.stringify(orders));
+    localStorage.setItem(KEYS.RENEWALS, JSON.stringify(renewals));
+    localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify(blockedPhones));
+
     if (data.versionConfig) {
       localStorage.setItem(
         'khobza_version_config_v1',
         typeof data.versionConfig === 'string' ? data.versionConfig : JSON.stringify(data.versionConfig)
       );
+    }
+
+    // Push all imported tables directly to Supabase
+    if (isSupabaseConfigured()) {
+      pushAllToSupabase({
+        families,
+        mandoubs,
+        admins,
+        orders,
+        renewals,
+        blockedPhones,
+        versionConfig: data.versionConfig,
+      }).catch(() => {});
     }
 
     pushToServer('overwrite');
@@ -448,6 +801,18 @@ export function resetToDefaultSeed(): void {
   localStorage.setItem(KEYS.ADMINS, JSON.stringify(INITIAL_ADMINS));
   localStorage.setItem(KEYS.ORDERS, JSON.stringify(INITIAL_ORDERS));
   localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify(INITIAL_BLOCKED_PHONES));
+
+  if (isSupabaseConfigured()) {
+    pushAllToSupabase({
+      families: INITIAL_FAMILIES,
+      mandoubs: INITIAL_MANDOUBS,
+      admins: INITIAL_ADMINS,
+      orders: INITIAL_ORDERS,
+      blockedPhones: INITIAL_BLOCKED_PHONES,
+    }).catch(() => {});
+  }
+
+  pushToServer('overwrite');
   window.dispatchEvent(new Event('khobza_data_change'));
 }
 
@@ -455,6 +820,7 @@ export function resetToDefaultSeed(): void {
 export interface SavedSession {
   role: UserRole;
   phone?: string;
+  familyId?: string;
   mandoubId?: string;
   adminId?: string;
 }
@@ -491,10 +857,9 @@ export function isPhoneBlocked(phone: string): boolean {
 export function calculateDaysRemaining(activationDate: string): number {
   if (!activationDate) return 30;
   try {
-    // Format YYYY-MM-DD or ISO string to YYYY/MM/DD for cross-platform Safari iOS compatibility
     const cleanDateStr = String(activationDate).replace(/-/g, '/').replace('T', ' ').split(' ')[0];
     const start = new Date(cleanDateStr).getTime();
-    if (isNaN(start)) return 30; // Guard against NaN on iOS Safari
+    if (isNaN(start)) return 30;
     const now = new Date().getTime();
     const diffDays = Math.floor((now - start) / (1000 * 60 * 60 * 24));
     if (isNaN(diffDays)) return 30;
@@ -507,7 +872,6 @@ export function calculateDaysRemaining(activationDate: string): number {
 
 export function getFamilies(): Family[] {
   const list = getStorage<Family[]>(KEYS.FAMILIES, INITIAL_FAMILIES);
-  // Auto update days remaining
   return list.map((f) => {
     const computedDays = calculateDaysRemaining(f.activationDate);
     const updatedStatus =
@@ -525,9 +889,149 @@ export function getFamilies(): Family[] {
 }
 
 export function getFamilyByPhone(phone: string): Family | undefined {
-  const cleanPhone = phone.trim();
+  if (!phone) return undefined;
+  const raw = String(phone).trim();
+  const cleanPhone = normalizeDigits(raw);
+  const normPhone = normalizeIraqiPhone(raw);
+  const rawDigits = cleanPhone.replace(/\D/g, '');
+
   const families = getFamilies();
-  return families.find((f) => f.phone === cleanPhone);
+  return families.find((f) => {
+    const fRaw = String(f.phone || '').trim();
+    const fClean = normalizeDigits(fRaw);
+    const fNorm = normalizeIraqiPhone(fRaw);
+    const fDigits = fClean.replace(/\D/g, '');
+
+    return (
+      fRaw === raw ||
+      fClean === cleanPhone ||
+      (normPhone && fNorm && fNorm === normPhone) ||
+      (rawDigits && fDigits && rawDigits === fDigits) ||
+      (rawDigits && fDigits && (fDigits.endsWith(rawDigits) || rawDigits.endsWith(fDigits)))
+    );
+  });
+}
+
+// Async multi-source Family verification (Supabase -> Server API)
+export async function verifyCustomerPhone(
+  phone: string,
+  currentLocation?: LocationData
+): Promise<{ success: boolean; isBlocked?: boolean; family?: Family; message?: string }> {
+  const raw = String(phone || '').trim();
+  const cleanPhone = normalizeDigits(raw);
+  const normPhone = normalizeIraqiPhone(raw);
+
+  if (!cleanPhone) {
+    return { success: false, message: 'يرجى إدخال رقم هاتف العائلة' };
+  }
+
+  // 1. Check if blocked in local storage
+  if (isPhoneBlocked(cleanPhone) || (normPhone && isPhoneBlocked(normPhone))) {
+    return {
+      success: false,
+      isBlocked: true,
+      message: 'عذراً، هذا الرقم محظور من استخدام التطبيق. يرجى التواصل مع إدارة الخبزة.',
+    };
+  }
+
+  // Sync latest cloud state in parallel
+  await syncWithServer(true).catch(() => {});
+
+  // 2. Direct Supabase Query (if configured)
+  if (isSupabaseConfigured()) {
+    try {
+      const supaFamily = await fetchFamilyByPhoneFromSupabase(cleanPhone);
+      if (supaFamily) {
+        if (supaFamily.isBlocked) {
+          return {
+            success: false,
+            isBlocked: true,
+            message: 'عذراً، تم حظر هذا الحساب من قبل الإدارة. يرجى التواصل مع إدارة الخبزة.',
+          };
+        }
+        if (currentLocation && (!supaFamily.location || !supaFamily.location.lat)) {
+          supaFamily.location = currentLocation;
+          upsertFamilyToSupabase(supaFamily).catch(() => {});
+        }
+        const localFamilies = getFamilies();
+        const existingIdx = localFamilies.findIndex(
+          (f) => f.id === supaFamily.id || f.phone === supaFamily.phone
+        );
+        if (existingIdx >= 0) {
+          localFamilies[existingIdx] = { ...localFamilies[existingIdx], ...supaFamily };
+        } else {
+          localFamilies.push(supaFamily);
+        }
+        setStorage(KEYS.FAMILIES, localFamilies);
+        return { success: true, family: supaFamily };
+      }
+    } catch (err) {
+      console.warn('Supabase family verification query:', err);
+    }
+  }
+
+  // 3. Central Server API Check (/api/auth/family)
+  try {
+    const res = await fetch('/api/auth/family', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: cleanPhone }),
+    });
+
+    const result = await res.json();
+    if (res.ok && result.success && result.family) {
+      const serverFam: Family = result.family;
+      if (currentLocation && (!serverFam.location || !serverFam.location.lat)) {
+        serverFam.location = currentLocation;
+      }
+      const localFamilies = getFamilies();
+      const existingIdx = localFamilies.findIndex(
+        (f) => f.id === serverFam.id || f.phone === serverFam.phone
+      );
+      if (existingIdx >= 0) {
+        localFamilies[existingIdx] = { ...localFamilies[existingIdx], ...serverFam };
+      } else {
+        localFamilies.push(serverFam);
+      }
+      setStorage(KEYS.FAMILIES, localFamilies);
+      return { success: true, family: serverFam };
+    } else if (result.isBlocked) {
+      return {
+        success: false,
+        isBlocked: true,
+        message: result.message || 'عذراً، هذا الرقم محظور من استخدام التطبيق.',
+      };
+    } else if (res.status === 404 || result.success === false) {
+      // Server explicitly confirms the family does NOT exist or was deleted!
+      // Purge any stale record from local storage to prevent phantom logins
+      const cleaned = getFamilies().filter((f) => f.phone !== cleanPhone && f.phone !== normPhone);
+      setStorage(KEYS.FAMILIES, cleaned, 'overwrite');
+      return {
+        success: false,
+        message: result.message || 'رقم الهاتف غير مسجل في قاعدة البيانات. يرجى التواصل مع إدارة الخبزة لتسجيل الاشتراك.',
+      };
+    }
+  } catch (err) {
+    console.warn('Server auth endpoint check error:', err);
+  }
+
+  // 4. If network is completely offline, verify against current synced list ONLY if network failed
+  const localFam = getFamilyByPhone(cleanPhone);
+  if (localFam) {
+    if (localFam.isBlocked) {
+      return {
+        success: false,
+        isBlocked: true,
+        message: 'عذراً، تم حظر هذا الحساب من قبل الإدارة.',
+      };
+    }
+    return { success: true, family: localFam };
+  }
+
+  return {
+    success: false,
+    message: 'رقم الهاتف غير مسجل في قاعدة البيانات أو تم حذفه من قبل الإدارة. يرجى مراجعة إدارة الخبزة.',
+  };
 }
 
 export function saveFamily(familyData: Omit<Family, 'id' | 'daysRemaining'> & { id?: string }): Family {
@@ -545,24 +1049,46 @@ export function saveFamily(familyData: Omit<Family, 'id' | 'daysRemaining'> & { 
     price = 20000;
   }
 
+  let savedFamily: Family;
+
   if (familyData.id) {
     // Edit existing
     const days = calculateDaysRemaining(familyData.activationDate || today);
-    const updatedList = list.map((f) =>
-      f.id === familyData.id
-        ? {
-            ...f,
-            ...familyData,
-            packageType: pkgType,
-            totalOrdersAllowed: familyData.totalOrdersAllowed ?? totalAllowed,
-            remainingOrders: familyData.remainingOrders ?? (totalAllowed > 0 ? totalAllowed : -1),
-            packagePriceIQD: familyData.packagePriceIQD ?? price,
-            daysRemaining: days,
-          }
-        : f
-    );
-    setStorage(KEYS.FAMILIES, updatedList);
-    return updatedList.find((f) => f.id === familyData.id)!;
+    let found = false;
+    const updatedList = list.map((f) => {
+      if (f.id === familyData.id || (familyData.phone && f.phone === familyData.phone)) {
+        found = true;
+        savedFamily = {
+          ...f,
+          ...familyData,
+          id: f.id || familyData.id,
+          packageType: pkgType,
+          totalOrdersAllowed: familyData.totalOrdersAllowed ?? (f.totalOrdersAllowed ?? totalAllowed),
+          remainingOrders: familyData.remainingOrders ?? (f.remainingOrders ?? (totalAllowed > 0 ? totalAllowed : -1)),
+          packagePriceIQD: familyData.packagePriceIQD ?? (f.packagePriceIQD ?? price),
+          daysRemaining: days,
+        };
+        return savedFamily;
+      }
+      return f;
+    });
+
+    if (!found) {
+      savedFamily = {
+        ...familyData,
+        id: familyData.id,
+        packageType: pkgType,
+        totalOrdersAllowed: familyData.totalOrdersAllowed ?? totalAllowed,
+        remainingOrders: familyData.remainingOrders ?? (totalAllowed > 0 ? totalAllowed : -1),
+        packagePriceIQD: familyData.packagePriceIQD ?? price,
+        activationDate: familyData.activationDate || today,
+        daysRemaining: days,
+      } as Family;
+      updatedList.push(savedFamily);
+    }
+
+    setStorage(KEYS.FAMILIES, updatedList, 'overwrite');
+    savedFamily = savedFamily || updatedList.find((f) => f.id === familyData.id)!;
   } else {
     // Create new
     const newId = `fam-${Date.now()}`;
@@ -578,9 +1104,25 @@ export function saveFamily(familyData: Omit<Family, 'id' | 'daysRemaining'> & { 
       daysRemaining: days,
     };
     list.push(newFamily);
-    setStorage(KEYS.FAMILIES, list);
-    return newFamily;
+    setStorage(KEYS.FAMILIES, list, 'overwrite');
+    savedFamily = newFamily;
   }
+
+  // Push directly to atomic server endpoint
+  if (typeof fetch !== 'undefined' && savedFamily) {
+    fetch('/api/families/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(savedFamily),
+    }).catch((err) => console.warn('Server family save error:', err));
+  }
+
+  // Push directly to Supabase
+  if (isSupabaseConfigured() && savedFamily) {
+    upsertFamilyToSupabase(savedFamily).catch(() => {});
+  }
+
+  return savedFamily;
 }
 
 // --- Renewal Requests ---
@@ -610,7 +1152,14 @@ export function createRenewalRequest(params: {
   }
 
   const mandoubs = getMandoubs();
-  const matchedMandoub = mandoubs.find((m) => m.vlanCode === params.family.vlanCode);
+  const matchedMandoub = mandoubs.find(
+    (m) =>
+      isVlanMatching(m.vlanCode, params.family.vlanCode) &&
+      (!m.status || m.status === 'active')
+  );
+  const activeMandoubs = mandoubs.filter((m) => !m.status || m.status === 'active');
+  const fallbackMandoub = !matchedMandoub && activeMandoubs.length === 1 ? activeMandoubs[0] : undefined;
+  const assignedMandoub = matchedMandoub || fallbackMandoub;
 
   const req: RenewalRequest = {
     id,
@@ -619,8 +1168,8 @@ export function createRenewalRequest(params: {
     familyPhone: params.family.phone,
     vlanCode: params.family.vlanCode,
     areaName: params.family.areaName,
-    mandoubId: matchedMandoub?.id,
-    mandoubName: matchedMandoub?.name,
+    mandoubId: assignedMandoub?.id,
+    mandoubName: assignedMandoub?.name,
     requestedPackage: params.requestedPackage,
     packageName,
     packagePriceIQD: price,
@@ -630,13 +1179,33 @@ export function createRenewalRequest(params: {
   };
 
   list.unshift(req);
-  setStorage(KEYS.RENEWALS, list);
+  setStorage(KEYS.RENEWALS, list, 'overwrite');
+
+  if (typeof fetch !== 'undefined') {
+    fetch('/api/renewals/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    }).catch((err) => console.warn('Server renewal save error:', err));
+  }
+
+  if (isSupabaseConfigured()) {
+    upsertRenewalToSupabase(req).catch(() => {});
+  }
 
   sendBrowserNotification(
     'طلب تجديد اشتراك جديد 🔄',
     `أرسلت عائلة ${params.family.fullName} طلب تجديد لـ (${packageName}) بمبلغ ${price.toLocaleString()} د.ع`,
-    { targetRole: 'mandoub' }
+    { targetRole: 'mandoub', force: true }
   );
+
+  broadcastExternalPush({
+    title: 'طلب تجديد اشتراك جديد 🔄',
+    body: `أرسلت عائلة ${params.family.fullName} طلب تجديد لـ (${packageName}) بمبلغ ${price.toLocaleString()} د.ع`,
+    targetRole: 'mandoub',
+    vlanCode: params.family.vlanCode,
+    orderId: req.id,
+  });
 
   return req;
 }
@@ -653,24 +1222,40 @@ export function confirmRenewalRequestByMandoub(
   const now = new Date().toISOString();
 
   // 1. Update request status
-  const updatedRequests = requests.map((r) =>
-    r.id === requestId
-      ? {
-          ...r,
-          status: 'confirmed' as const,
-          mandoubId: mandoub.id,
-          mandoubName: mandoub.name,
-          confirmedAt: now,
-        }
-      : r
-  );
-  setStorage(KEYS.RENEWALS, updatedRequests);
+  let updatedReq: RenewalRequest | undefined;
+  const updatedRequests = requests.map((r) => {
+    if (r.id === requestId) {
+      updatedReq = {
+        ...r,
+        status: 'confirmed' as const,
+        mandoubId: mandoub.id,
+        mandoubName: mandoub.name,
+        confirmedAt: now,
+      };
+      return updatedReq;
+    }
+    return r;
+  });
+  setStorage(KEYS.RENEWALS, updatedRequests, 'overwrite');
+
+  if (typeof fetch !== 'undefined' && updatedReq) {
+    fetch('/api/renewals/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedReq),
+    }).catch(() => {});
+  }
+
+  if (isSupabaseConfigured() && updatedReq) {
+    upsertRenewalToSupabase(updatedReq).catch(() => {});
+  }
 
   // 2. Update Family Package & Subscription Status
   const families = getFamilies();
+  let updatedFam: Family | undefined;
   const updatedFamilies = families.map((f) => {
     if (f.id === req.familyId || f.phone === req.familyPhone) {
-      return {
+      updatedFam = {
         ...f,
         packageType: req.requestedPackage,
         remainingOrders: req.ordersCount,
@@ -680,10 +1265,23 @@ export function confirmRenewalRequestByMandoub(
         activationDate: today,
         daysRemaining: 30,
       };
+      return updatedFam;
     }
     return f;
   });
-  setStorage(KEYS.FAMILIES, updatedFamilies);
+  setStorage(KEYS.FAMILIES, updatedFamilies, 'overwrite');
+
+  if (typeof fetch !== 'undefined' && updatedFam) {
+    fetch('/api/families/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedFam),
+    }).catch(() => {});
+  }
+
+  if (isSupabaseConfigured() && updatedFam) {
+    upsertFamilyToSupabase(updatedFam).catch(() => {});
+  }
 
   sendBrowserNotification(
     'تأكيد تجديد الاشتراك 🌟',
@@ -697,48 +1295,87 @@ export function rejectRenewalRequestByMandoub(
   reason: string
 ): void {
   const requests = getRenewalRequests();
-  const updatedRequests = requests.map((r) =>
-    r.id === requestId
-      ? {
-          ...r,
-          status: 'rejected_mandoub' as const,
-          mandoubId: mandoub.id,
-          mandoubName: mandoub.name,
-          rejectionReason: reason || 'تم رفض التجديد من قبل المندوب',
-        }
-      : r
-  );
-  setStorage(KEYS.RENEWALS, updatedRequests);
+  let updatedReq: RenewalRequest | undefined;
+  const updatedRequests = requests.map((r) => {
+    if (r.id === requestId) {
+      updatedReq = {
+        ...r,
+        status: 'rejected_mandoub' as const,
+        mandoubId: mandoub.id,
+        mandoubName: mandoub.name,
+        rejectionReason: reason || 'تم رفض التجديد من قبل المندوب',
+      };
+      return updatedReq;
+    }
+    return r;
+  });
+  setStorage(KEYS.RENEWALS, updatedRequests, 'overwrite');
+  if (typeof fetch !== 'undefined' && updatedReq) {
+    fetch('/api/renewals/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedReq),
+    }).catch(() => {});
+  }
+  if (isSupabaseConfigured() && updatedReq) {
+    upsertRenewalToSupabase(updatedReq).catch(() => {});
+  }
 }
 
 export function rejectRenewalRequestByAdmin(requestId: string, reason: string): void {
   const requests = getRenewalRequests();
-  const updatedRequests = requests.map((r) =>
-    r.id === requestId
-      ? {
-          ...r,
-          status: 'rejected_admin' as const,
-          rejectionReason: reason || 'تم رفض التجديد من قبل الأدمن',
-        }
-      : r
-  );
-  setStorage(KEYS.RENEWALS, updatedRequests);
+  let updatedReq: RenewalRequest | undefined;
+  const updatedRequests = requests.map((r) => {
+    if (r.id === requestId) {
+      updatedReq = {
+        ...r,
+        status: 'rejected_admin' as const,
+        rejectionReason: reason || 'تم رفض التجديد من قبل الأدمن',
+      };
+      return updatedReq;
+    }
+    return r;
+  });
+  setStorage(KEYS.RENEWALS, updatedRequests, 'overwrite');
+  if (typeof fetch !== 'undefined' && updatedReq) {
+    fetch('/api/renewals/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedReq),
+    }).catch(() => {});
+  }
+  if (isSupabaseConfigured() && updatedReq) {
+    upsertRenewalToSupabase(updatedReq).catch(() => {});
+  }
 }
 
 export function renewFamilySubscription(familyId: string): void {
   const list = getFamilies();
   const today = new Date().toISOString().split('T')[0];
-  const updatedList = list.map((f) =>
-    f.id === familyId
-      ? {
-          ...f,
-          activationDate: today,
-          subscriptionStatus: 'active' as const,
-          daysRemaining: 30,
-        }
-      : f
-  );
-  setStorage(KEYS.FAMILIES, updatedList);
+  let updatedFam: Family | undefined;
+  const updatedList = list.map((f) => {
+    if (f.id === familyId) {
+      updatedFam = {
+        ...f,
+        activationDate: today,
+        subscriptionStatus: 'active' as const,
+        daysRemaining: 30,
+      };
+      return updatedFam;
+    }
+    return f;
+  });
+  setStorage(KEYS.FAMILIES, updatedList, 'overwrite');
+  if (typeof fetch !== 'undefined' && updatedFam) {
+    fetch('/api/families/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedFam),
+    }).catch(() => {});
+  }
+  if (isSupabaseConfigured() && updatedFam) {
+    upsertFamilyToSupabase(updatedFam).catch(() => {});
+  }
 }
 
 export function toggleBlockFamily(familyId: string, shouldBlock: boolean): void {
@@ -746,32 +1383,101 @@ export function toggleBlockFamily(familyId: string, shouldBlock: boolean): void 
   const fam = list.find((f) => f.id === familyId);
   if (!fam) return;
 
-  const updatedList = list.map((f) =>
-    f.id === familyId ? { ...f, isBlocked: shouldBlock } : f
-  );
-  setStorage(KEYS.FAMILIES, updatedList);
+  let updatedFam: Family | undefined;
+  const updatedList = list.map((f) => {
+    if (f.id === familyId) {
+      updatedFam = { ...f, isBlocked: shouldBlock };
+      return updatedFam;
+    }
+    return f;
+  });
+  setStorage(KEYS.FAMILIES, updatedList, 'overwrite');
+
+  if (typeof fetch !== 'undefined') {
+    fetch('/api/blocked-phones/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: fam.phone, block: shouldBlock }),
+    }).catch(() => {});
+    if (updatedFam) {
+      fetch('/api/families/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedFam),
+      }).catch(() => {});
+    }
+  }
+
+  if (isSupabaseConfigured() && updatedFam) {
+    upsertFamilyToSupabase(updatedFam).catch(() => {});
+  }
 
   // Sync to blocked phones list
   let blocked = getBlockedPhones();
   if (shouldBlock) {
     if (!blocked.includes(fam.phone)) {
       blocked.push(fam.phone);
+      if (isSupabaseConfigured()) {
+        upsertBlockedPhoneToSupabase(fam.phone).catch(() => {});
+      }
     }
   } else {
     blocked = blocked.filter((p) => p !== fam.phone);
+    if (isSupabaseConfigured()) {
+      deleteBlockedPhoneFromSupabase(fam.phone).catch(() => {});
+    }
   }
-  setStorage(KEYS.BLOCKED_PHONES, blocked);
+  setStorage(KEYS.BLOCKED_PHONES, blocked, 'overwrite');
 }
 
 export function updateFamilyLocation(familyId: string, location: LocationData): void {
   const list = getFamilies();
-  const updated = list.map((f) => (f.id === familyId ? { ...f, location } : f));
-  setStorage(KEYS.FAMILIES, updated);
+  let updatedFam: Family | undefined;
+  const updated = list.map((f) => {
+    if (f.id === familyId) {
+      updatedFam = { ...f, location };
+      return updatedFam;
+    }
+    return f;
+  });
+  setStorage(KEYS.FAMILIES, updated, 'overwrite');
+  if (typeof fetch !== 'undefined' && updatedFam) {
+    fetch('/api/families/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedFam),
+    }).catch(() => {});
+  }
+  if (isSupabaseConfigured()) {
+    updateFamilyLocationInSupabase(familyId, location).catch(() => {});
+  }
 }
 
 export function deleteFamily(familyId: string): void {
-  const list = getFamilies().filter((f) => f.id !== familyId);
+  const currentFamilies = getFamilies();
+  const targetFam = currentFamilies.find((f) => f.id === familyId);
+  const list = currentFamilies.filter((f) => f.id !== familyId);
   setStorage(KEYS.FAMILIES, list, 'overwrite');
+
+  // If current session is this deleted family, terminate immediately
+  const session = getSavedSession();
+  if (session.role === 'customer' && (session.familyId === familyId || (targetFam && session.phone === targetFam.phone))) {
+    clearSession();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('khobza_session_terminated', { detail: { reason: 'account_deleted' } }));
+    }
+  }
+
+  if (typeof fetch !== 'undefined') {
+    fetch('/api/families/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: familyId, phone: targetFam?.phone }),
+    }).catch(() => {});
+  }
+  if (isSupabaseConfigured()) {
+    deleteFamilyFromSupabase(familyId).catch(() => {});
+  }
 }
 
 // --- Mandoubs ---
@@ -781,6 +1487,7 @@ export function getMandoubs(): Mandoub[] {
     if (!m.currentLocation) {
       return {
         ...m,
+        status: m.status || 'active',
         currentLocation: {
           lat: 33.3128,
           lng: 44.3615,
@@ -788,7 +1495,7 @@ export function getMandoubs(): Mandoub[] {
         },
       };
     }
-    return m;
+    return { ...m, status: m.status || 'active' };
   });
 }
 
@@ -830,41 +1537,111 @@ export function authenticateMandoub(identifier: string, pass: string): Mandoub |
 
 export function saveMandoub(data: Omit<Mandoub, 'id'> & { id?: string }): Mandoub {
   const list = getMandoubs();
+  let saved: Mandoub;
   if (data.id) {
-    const updated = list.map((m) => (m.id === data.id ? { ...m, ...data } : m));
+    let found = false;
+    const updated = list.map((m) => {
+      if (m.id === data.id || (data.username && m.username === data.username)) {
+        found = true;
+        saved = { ...m, ...data, id: m.id || data.id };
+        return saved;
+      }
+      return m;
+    });
+    if (!found) {
+      saved = {
+        ...data,
+        id: data.id,
+        status: data.status || 'active',
+      } as Mandoub;
+      updated.push(saved);
+    }
     setStorage(KEYS.MANDOUBS, updated, 'overwrite');
-    return updated.find((m) => m.id === data.id)!;
+    saved = saved || updated.find((m) => m.id === data.id)!;
   } else {
     const newMandoub: Mandoub = {
       ...data,
       id: `mandoub-${Date.now()}`,
+      status: data.status || 'active',
     };
     list.push(newMandoub);
     setStorage(KEYS.MANDOUBS, list, 'overwrite');
-    return newMandoub;
+    saved = newMandoub;
   }
+
+  // Push directly to atomic server endpoint
+  if (typeof fetch !== 'undefined' && saved) {
+    fetch('/api/mandoubs/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(saved),
+    }).catch((err) => console.warn('Server mandoub save error:', err));
+  }
+
+  // Push directly to Supabase
+  if (isSupabaseConfigured() && saved) {
+    upsertMandoubToSupabase(saved).catch(() => {});
+  }
+
+  return saved;
 }
 
 export function deleteMandoub(id: string): void {
-  const list = getMandoubs().filter((m) => m.id !== id);
+  const currentMandoubs = getMandoubs();
+  const targetMandoub = currentMandoubs.find((m) => m.id === id);
+  const list = currentMandoubs.filter((m) => m.id !== id);
   setStorage(KEYS.MANDOUBS, list, 'overwrite');
+
+  // If current session is this deleted mandoub, terminate immediately
+  const session = getSavedSession();
+  if (session.role === 'mandoub' && (session.mandoubId === id || (targetMandoub && session.mandoubId === targetMandoub.id))) {
+    clearSession();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('khobza_session_terminated', { detail: { reason: 'account_deleted' } }));
+    }
+  }
+
+  if (typeof fetch !== 'undefined') {
+    fetch('/api/mandoubs/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, username: targetMandoub?.username }),
+    }).catch(() => {});
+  }
+  if (isSupabaseConfigured()) {
+    deleteMandoubFromSupabase(id).catch(() => {});
+  }
 }
 
 export function updateMandoubLocation(mandoubId: string, lat: number, lng: number, addressText?: string): void {
   const list = getMandoubs();
-  const updated = list.map((m) =>
-    m.id === mandoubId
-      ? {
-          ...m,
-          currentLocation: {
-            lat,
-            lng,
-            addressText: addressText || `موقع تحديث المندوب (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
-          },
-        }
-      : m
-  );
-  setStorage(KEYS.MANDOUBS, updated);
+  const loc: LocationData = {
+    lat,
+    lng,
+    addressText: addressText || `موقع تحديث المندوب (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
+  };
+  let updatedMandoub: Mandoub | undefined;
+  const updated = list.map((m) => {
+    if (m.id === mandoubId) {
+      updatedMandoub = {
+        ...m,
+        currentLocation: loc,
+      };
+      return updatedMandoub;
+    }
+    return m;
+  });
+  setStorage(KEYS.MANDOUBS, updated, 'overwrite');
+  if (typeof fetch !== 'undefined' && updatedMandoub) {
+    fetch('/api/mandoubs/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedMandoub),
+    }).catch(() => {});
+  }
+  if (isSupabaseConfigured()) {
+    updateMandoubLocationInSupabase(mandoubId, loc).catch(() => {});
+  }
 }
 
 // --- Admin Accounts ---
@@ -897,7 +1674,7 @@ export function authenticateAdmin(identifier: string, pass: string): AdminUser |
   });
 }
 
-// Comprehensive asynchronous login that syncs with cloud and queries server if needed
+// Comprehensive asynchronous login that queries server backend directly
 export async function loginStaff(
   identifier: string,
   pass: string
@@ -921,27 +1698,7 @@ export async function loginStaff(
     // continue
   }
 
-  // 2. Check Admin locally
-  const admin = authenticateAdmin(rawId, rawPass);
-  if (admin) {
-    saveSession({ role: 'admin', adminId: admin.id });
-    return { success: true, role: 'admin', user: admin };
-  }
-
-  // 3. Check Mandoub locally
-  const mandoub = authenticateMandoub(rawId, rawPass);
-  if (mandoub) {
-    if (mandoub.status === 'disabled' || mandoub.status === 'inactive') {
-      return {
-        success: false,
-        error: 'عذراً، تم تعطيل حساب المندوب هذا من قبل الإدارة. يرجى التواصل مع مسؤول النظام.',
-      };
-    }
-    saveSession({ role: 'mandoub', mandoubId: mandoub.id });
-    return { success: true, role: 'mandoub', user: mandoub };
-  }
-
-  // 4. Fallback: Query direct /api/auth/staff server endpoint in case local storage was behind
+  // 2. Query direct /api/auth/staff server endpoint as the single source of truth
   try {
     const response = await fetch('/api/auth/staff', {
       method: 'POST',
@@ -955,7 +1712,7 @@ export async function loginStaff(
         const adminUser = result.user as AdminUser;
         const currentAdmins = getAdminAccounts();
         if (!currentAdmins.some((a) => a.id === adminUser.id)) {
-          setStorage(KEYS.ADMINS, [...currentAdmins, adminUser]);
+          setStorage(KEYS.ADMINS, [...currentAdmins, adminUser], 'overwrite');
         }
         saveSession({ role: 'admin', adminId: adminUser.id });
         return { success: true, role: 'admin', user: adminUser };
@@ -963,55 +1720,85 @@ export async function loginStaff(
         const mandoubUser = result.user as Mandoub;
         const currentMandoubs = getMandoubs();
         if (!currentMandoubs.some((m) => m.id === mandoubUser.id)) {
-          setStorage(KEYS.MANDOUBS, [...currentMandoubs, mandoubUser]);
+          setStorage(KEYS.MANDOUBS, [...currentMandoubs, mandoubUser], 'overwrite');
         }
         saveSession({ role: 'mandoub', mandoubId: mandoubUser.id });
         return { success: true, role: 'mandoub', user: mandoubUser };
       }
-    } else if (result.message) {
-      return { success: false, error: result.message };
+    } else if (response.status === 401 || response.status === 404 || response.status === 403 || result.success === false) {
+      // Clean local cache of any matching mandoub to prevent stale retention
+      const cleanId = normalizeDigits(rawId).toLowerCase();
+      const cleaned = getMandoubs().filter((m) => normalizeDigits(m.username || '').toLowerCase() !== cleanId && normalizeDigits(m.phone || '').replace(/\D/g, '') !== cleanId);
+      setStorage(KEYS.MANDOUBS, cleaned, 'overwrite');
+      return { success: false, error: result.message || 'اسم المستخدم أو كلمة السر غير صحيحة أو تم حذف الحساب من قبل الإدارة' };
     }
   } catch (err) {
     console.warn('Direct server auth fetch warning:', err);
   }
 
-  // 5. Detect if username was correct but password wrong in local state
-  const cleanId = normalizeDigits(rawId).toLowerCase();
-  const idDigits = cleanId.replace(/\D/g, '');
-  const allMandoubs = getMandoubs();
-  const foundMandoubWrongPass = allMandoubs.find((m) => {
-    const mUser = normalizeDigits(m.username || '').toLowerCase();
-    const mPhone = normalizeDigits(m.phone || '').replace(/\D/g, '');
-    return mUser === cleanId || (mPhone && idDigits && mPhone === idDigits);
-  });
-
-  if (foundMandoubWrongPass) {
-    return {
-      success: false,
-      error: 'كلمة السر غير صحيحة. يرجى التأكد من كتابة كلمة السر بدقة',
-    };
+  // 3. Fallback only if offline network: Admin offline access check
+  const admin = authenticateAdmin(rawId, rawPass);
+  if (admin) {
+    saveSession({ role: 'admin', adminId: admin.id });
+    return { success: true, role: 'admin', user: admin };
   }
 
   return {
     success: false,
-    error: 'اسم المستخدم أو كلمة السر غير صحيحة. يرجى مراجعة الإدارة للتأكد من الحساب.',
+    error: 'اسم المستخدم أو كلمة السر غير صحيحة أو تم حذف الحساب من قبل الإدارة. يرجى مراجعة إدارة النظام.',
   };
 }
 
 export function saveAdminAccount(data: Omit<AdminUser, 'id'> & { id?: string }): AdminUser {
   const list = getAdminAccounts();
+  let savedAdmin: AdminUser;
   if (data.id) {
-    const updated = list.map((a) => (a.id === data.id ? { ...a, ...data } : a));
-    setStorage(KEYS.ADMINS, updated);
-    return updated.find((a) => a.id === data.id)!;
+    const updated = list.map((a) => {
+      if (a.id === data.id) {
+        savedAdmin = { ...a, ...data };
+        return savedAdmin;
+      }
+      return a;
+    });
+    setStorage(KEYS.ADMINS, updated, 'overwrite');
+    savedAdmin = updated.find((a) => a.id === data.id)!;
   } else {
     const newAdmin: AdminUser = {
       ...data,
       id: `admin-${Date.now()}`,
     };
     list.push(newAdmin);
-    setStorage(KEYS.ADMINS, list);
-    return newAdmin;
+    setStorage(KEYS.ADMINS, list, 'overwrite');
+    savedAdmin = newAdmin;
+  }
+
+  if (typeof fetch !== 'undefined' && savedAdmin) {
+    fetch('/api/admins/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(savedAdmin),
+    }).catch(() => {});
+  }
+
+  if (isSupabaseConfigured() && savedAdmin) {
+    upsertAdminToSupabase(savedAdmin).catch(() => {});
+  }
+
+  return savedAdmin;
+}
+
+export function deleteAdminAccount(adminId: string): void {
+  const list = getAdminAccounts().filter((a) => a.id !== adminId);
+  setStorage(KEYS.ADMINS, list, 'overwrite');
+  if (typeof fetch !== 'undefined') {
+    fetch('/api/admins/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: adminId }),
+    }).catch(() => {});
+  }
+  if (isSupabaseConfigured()) {
+    deleteAdminFromSupabase(adminId).catch(() => {});
   }
 }
 
@@ -1025,7 +1812,7 @@ export function generateUniqueOrderId(): string {
   let id = '';
   let exists = true;
   while (exists) {
-    const randNum = Math.floor(100000 + Math.random() * 900000); // 6 digit number
+    const randNum = Math.floor(100000 + Math.random() * 900000);
     id = `KH-${randNum}`;
     exists = existingOrders.some((o) => o.id === id);
   }
@@ -1067,6 +1854,18 @@ export function createOrder(params: {
       break;
   }
 
+  const mandoubs = getMandoubs();
+  const activeMandoubs = mandoubs.filter((m) => !m.status || m.status === 'active');
+  const matchedMandoub = activeMandoubs.find((m) =>
+    isOrderMatchedToMandoub(
+      { vlanCode: params.family.vlanCode, areaName: params.family.areaName },
+      m,
+      activeMandoubs
+    )
+  );
+  const fallbackMandoub = !matchedMandoub && activeMandoubs.length === 1 ? activeMandoubs[0] : undefined;
+  const assignedMandoub = matchedMandoub || fallbackMandoub;
+
   const now = new Date().toISOString();
   const newOrder: Order = {
     id,
@@ -1077,6 +1876,8 @@ export function createOrder(params: {
     vlanCode: params.family.vlanCode,
     areaName: params.family.areaName,
     bakeryName: params.family.bakeryName || 'مخبز الخبزة الرئيسي',
+    mandoubId: assignedMandoub?.id,
+    mandoubName: assignedMandoub?.name,
     orderType: params.orderType,
     priceAmount,
     quantity: computedQty,
@@ -1089,12 +1890,24 @@ export function createOrder(params: {
   };
 
   list.unshift(newOrder);
-  setStorage(KEYS.ORDERS, list);
+  setStorage(KEYS.ORDERS, list, 'merge');
+
+  if (typeof fetch !== 'undefined') {
+    fetch('/api/orders/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newOrder),
+    }).catch((err) => console.warn('Server order save error:', err));
+  }
+
+  if (isSupabaseConfigured()) {
+    upsertOrderToSupabase(newOrder).catch(() => {});
+  }
 
   sendBrowserNotification(
     'طلب خبز جديد وصل للمندوب! 🥖🔔',
     `وصل طلب خبز جديد (${newOrder.quantity} ${newOrder.unitText}) لعائلة ${newOrder.familyName}`,
-    { orderId: newOrder.id, targetRole: 'mandoub' }
+    { orderId: newOrder.id, targetRole: 'mandoub', vlanCode: newOrder.vlanCode }
   );
 
   return newOrder;
@@ -1152,31 +1965,66 @@ export function updateOrderStatus(
     if (fam && fam.packageType !== 'unlimited') {
       const currentRemaining = typeof fam.remainingOrders === 'number' ? fam.remainingOrders : 15;
       const newRemaining = Math.max(0, currentRemaining - 1);
-      const updatedFamilies = families.map((f) =>
-        f.id === fam.id
-          ? {
-              ...f,
-              remainingOrders: newRemaining,
-              subscriptionStatus: newRemaining <= 0 ? ('expired' as const) : f.subscriptionStatus,
-            }
-          : f
-      );
+      let updatedFam: Family | undefined;
+      const updatedFamilies = families.map((f) => {
+        if (f.id === fam.id) {
+          updatedFam = {
+            ...f,
+            remainingOrders: newRemaining,
+            subscriptionStatus: newRemaining <= 0 ? ('expired' as const) : f.subscriptionStatus,
+          };
+          return updatedFam;
+        }
+        return f;
+      });
       localStorage.setItem(KEYS.FAMILIES, JSON.stringify(updatedFamilies));
+      if (typeof fetch !== 'undefined' && updatedFam) {
+        fetch('/api/families/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedFam),
+        }).catch(() => {});
+      }
+      if (isSupabaseConfigured() && updatedFam) {
+        upsertFamilyToSupabase(updatedFam).catch(() => {});
+      }
     }
   }
 
-  // Atomically update local storage before pushing to prevent race conditions
+  // Atomically update local storage
   localStorage.setItem(KEYS.ORDERS, JSON.stringify(updatedList));
   lastMutationTime = Date.now();
   window.dispatchEvent(new Event('khobza_data_change'));
-  pushToServer('overwrite');
+
+  if (typeof fetch !== 'undefined' && updatedOrder) {
+    fetch('/api/orders/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: orderId,
+        status: newStatus,
+        updates: {
+          ...(extra?.mandoubId && { mandoubId: extra.mandoubId }),
+          ...(extra?.mandoubName && { mandoubName: extra.mandoubName }),
+          ...(extra?.adminNote !== undefined && { adminNote: extra.adminNote }),
+          ...(extra?.unpaidResolved !== undefined && { unpaidResolved: extra.unpaidResolved }),
+          ...(extra?.unpaidAmount !== undefined && { unpaidAmount: extra.unpaidAmount }),
+          ...(newStatus === 'completed_confirmed' && { customerConfirmedAt: now }),
+        },
+      }),
+    }).catch((err) => console.warn('Server order status error:', err));
+  }
+
+  if (isSupabaseConfigured() && updatedOrder) {
+    upsertOrderToSupabase(updatedOrder).catch(() => {});
+  }
 
   if (updatedOrder) {
     if (newStatus === 'under_review') {
       sendBrowserNotification(
         '🎉 وصل الخبز إلى منزلكم!',
         `قام المندوب بتوصيل طلب الخبز (${updatedOrder.quantity} ${updatedOrder.unitText}). يرجى تأكيد الاستلام الآن!`,
-        { orderId: updatedOrder.id, targetRole: 'family', force: true }
+        { orderId: updatedOrder.id, targetRole: 'family', targetPhone: updatedOrder.familyPhone }
       );
       broadcastExternalPush({
         title: '🎉 وصل الخبز إلى منزلكم!',
@@ -1189,19 +2037,20 @@ export function updateOrderStatus(
       sendBrowserNotification(
         '✅ تم تأكيد استلام الطلب',
         `تم تأكيد استلام الطلب (${updatedOrder.quantity} ${updatedOrder.unitText}) بنجاح من قبل العائلة.`,
-        { orderId: updatedOrder.id, targetRole: 'mandoub', force: true }
+        { orderId: updatedOrder.id, targetRole: 'mandoub', vlanCode: updatedOrder.vlanCode }
       );
       broadcastExternalPush({
         title: '✅ تم تأكيد استلام الطلب',
         body: `تم تأكيد استلام الطلب (${updatedOrder.quantity} ${updatedOrder.unitText}) بنجاح من قبل العائلة.`,
         targetRole: 'mandoub',
+        vlanCode: updatedOrder.vlanCode,
         orderId: updatedOrder.id,
       });
     } else if (newStatus === 'processing_unpaid' || newStatus === 'unpaid_confirmed') {
       sendBrowserNotification(
         'تنبيه: طلب غير مسدد ⚠️',
         `تم تسجيل بلاغ عدم تسديد للطلب ${updatedOrder.id} (${updatedOrder.familyName}).`,
-        { orderId: updatedOrder.id, targetRole: 'all', force: true }
+        { orderId: updatedOrder.id, targetRole: 'all' }
       );
     }
   }
@@ -1209,11 +2058,25 @@ export function updateOrderStatus(
   return updatedOrder;
 }
 
+export function deleteOrder(orderId: string): void {
+  const list = getOrders().filter((o) => o.id !== orderId);
+  setStorage(KEYS.ORDERS, list, 'overwrite');
+  if (typeof fetch !== 'undefined') {
+    fetch('/api/orders/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: orderId }),
+    }).catch(() => {});
+  }
+  if (isSupabaseConfigured()) {
+    deleteOrderFromSupabase(orderId).catch(() => {});
+  }
+}
+
 // Customer confirms receipt with direct persistence and immediate callback
 export function confirmOrderReceipt(orderId: string): Order | undefined {
   return updateOrderStatus(orderId, 'completed_confirmed');
 }
-
 
 // --- Statistics & Accounting ---
 export function calculateStatistics(): StatisticsData {
@@ -1238,7 +2101,10 @@ export function calculateStatistics(): StatisticsData {
   const expiredFamiliesCount = families.filter((f) => f.subscriptionStatus === 'expired' || f.daysRemaining <= 0).length;
 
   const mandoubStats = mandoubs.map((m) => {
-    const mandoubOrders = orders.filter((o) => o.vlanCode === m.vlanCode);
+    const mandoubVlan = normalizeVlanCode(m.vlanCode);
+    const mandoubOrders = orders.filter(
+      (o) => normalizeVlanCode(o.vlanCode) === mandoubVlan || o.mandoubId === m.id
+    );
     const incomplete = mandoubOrders.filter((o) =>
       ['pending', 'under_review', 'processing_unpaid'].includes(o.status)
     ).length;
@@ -1278,18 +2144,17 @@ export function calculateAccounting(): AccountingSummary {
   const subscriptionFeeIQD = 10000;
   let totalGrossRevenue = 0;
 
-  // Calculate gross revenue from active families and confirmed renewals
   activeFamilies.forEach((f) => {
     totalGrossRevenue += f.packagePriceIQD || 10000;
   });
 
   const mandoubSalaries = mandoubs.map((m) => {
-    const vlanCustomers = activeFamilies.filter((f) => f.vlanCode === m.vlanCode);
+    const mandoubVlan = normalizeVlanCode(m.vlanCode);
+    const vlanCustomers = activeFamilies.filter((f) => normalizeVlanCode(f.vlanCode) === mandoubVlan);
     const count = vlanCustomers.length;
 
-    // Total package cash collected by this Mandoub
     const vlanRenewals = renewals.filter(
-      (r) => r.vlanCode === m.vlanCode || r.mandoubId === m.id
+      (r) => normalizeVlanCode(r.vlanCode) === mandoubVlan || r.mandoubId === m.id
     );
     const collectedPackageCashIQD = vlanRenewals.reduce((sum, r) => sum + (r.packagePriceIQD || 0), 0);
 
@@ -1329,3 +2194,4 @@ export function calculateAccounting(): AccountingSummary {
     mandoubSalaries,
   };
 }
+

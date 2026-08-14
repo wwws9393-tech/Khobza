@@ -105,6 +105,8 @@ self.addEventListener('push', (event) => {
     }
   }
 
+  options.body = body;
+
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
@@ -119,7 +121,10 @@ self.addEventListener('notificationclick', (event) => {
   }
 
   const data = event.notification.data || {};
-  const targetUrl = new URL(data.url || '/', self.location.origin);
+  let targetUrl = new URL(data.url || '/', self.location.origin);
+  if (data.orderId) {
+    targetUrl.searchParams.set('open_order', data.orderId);
+  }
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
