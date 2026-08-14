@@ -95,9 +95,17 @@ function mergeArraysById<T extends { id: string }>(arr1: T[], arr2: T[]): T[] {
   return Array.from(map.values());
 }
 
+export function normalizeDigits(str: string): string {
+  if (!str) return '';
+  return String(str)
+    .replace(/[٠-٩]/g, (d) => '0123456789'['٠١٢٣٤٥٦٧٨٩'.indexOf(d)])
+    .replace(/[۰-۹]/g, (d) => '0123456789'['۰۱۲۳۴۵۶۷۸۹'.indexOf(d)])
+    .trim();
+}
+
 let lastMutationTime = 0;
 
-export async function pushToServer(action: 'merge' | 'overwrite' = 'overwrite'): Promise<void> {
+export async function pushToServer(action: 'merge' | 'overwrite' | 'admin_reset' = 'merge'): Promise<void> {
   try {
     lastMutationTime = Date.now();
     const families = getStorage(KEYS.FAMILIES, INITIAL_FAMILIES);
@@ -134,9 +142,9 @@ export async function pushToServer(action: 'merge' | 'overwrite' = 'overwrite'):
   }
 }
 
-export async function syncWithServer(): Promise<void> {
-  // Rapid sync settling - wait 2000ms after a local mutation to allow pushToServer to settle
-  if (Date.now() - lastMutationTime < 2000) {
+export async function syncWithServer(force = false): Promise<void> {
+  // Rapid sync settling - wait 2000ms after a local mutation to allow pushToServer to settle unless forced
+  if (!force && Date.now() - lastMutationTime < 2000) {
     return;
   }
 
@@ -177,43 +185,34 @@ export async function syncWithServer(): Promise<void> {
       }
     }
 
-    // Sync with local backend
-    const res = await fetch('/api/db');
+    // Sync with local backend with timestamp cache-buster
+    const res = await fetch(`/api/db?t=${Date.now()}`, {
+      headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+    });
     if (!res.ok) return;
     const data = await res.json();
     if (data && typeof data === 'object') {
       let changed = false;
 
-      // Smart anti-wipe protection:
-      // If server has empty families/mandoubs, but local storage has active data,
-      // DO NOT wipe local data; heal server instead!
-      const localFamilies = getStorage<Family[]>(KEYS.FAMILIES, []);
-      const localMandoubs = getStorage<Mandoub[]>(KEYS.MANDOUBS, []);
-      const localOrders = getStorage<Order[]>(KEYS.ORDERS, []);
-
-      const serverFamiliesEmpty = !data.families || data.families.length === 0;
-      const serverMandoubsEmpty = !data.mandoubs || data.mandoubs.length === 0;
-
-      if ((serverFamiliesEmpty && localFamilies.length > 0) || (serverMandoubsEmpty && localMandoubs.length > 0)) {
-        // Heal server with existing local data
-        pushToServer('overwrite');
-        return;
-      }
-
       // Sync families
       if (Array.isArray(data.families)) {
-        const serverStr = JSON.stringify(data.families);
-        if (serverStr !== localStorage.getItem(KEYS.FAMILIES)) {
-          localStorage.setItem(KEYS.FAMILIES, serverStr);
+        const localFamilies = getStorage<Family[]>(KEYS.FAMILIES, []);
+        // Merge without losing locally added families
+        const mergedFamilies = mergeArraysById(localFamilies, data.families);
+        const mergedStr = JSON.stringify(mergedFamilies);
+        if (mergedStr !== localStorage.getItem(KEYS.FAMILIES)) {
+          localStorage.setItem(KEYS.FAMILIES, mergedStr);
           changed = true;
         }
       }
 
       // Sync mandoubs
       if (Array.isArray(data.mandoubs)) {
-        const serverStr = JSON.stringify(data.mandoubs);
-        if (serverStr !== localStorage.getItem(KEYS.MANDOUBS)) {
-          localStorage.setItem(KEYS.MANDOUBS, serverStr);
+        const localMandoubs = getStorage<Mandoub[]>(KEYS.MANDOUBS, []);
+        const mergedMandoubs = mergeArraysById(localMandoubs, data.mandoubs);
+        const mergedStr = JSON.stringify(mergedMandoubs);
+        if (mergedStr !== localStorage.getItem(KEYS.MANDOUBS)) {
+          localStorage.setItem(KEYS.MANDOUBS, mergedStr);
           changed = true;
         }
       }
@@ -229,6 +228,7 @@ export async function syncWithServer(): Promise<void> {
 
       // Sync orders
       if (Array.isArray(data.orders)) {
+        const localOrders = getStorage<Order[]>(KEYS.ORDERS, []);
         const mergedOrders = mergeArraysById(localOrders, data.orders);
         const mergedStr = JSON.stringify(mergedOrders);
         if (mergedStr !== localStorage.getItem(KEYS.ORDERS)) {
@@ -264,7 +264,7 @@ export async function syncWithServer(): Promise<void> {
   }
 }
 
-function setStorage<T>(key: string, value: T, action: 'merge' | 'overwrite' = 'overwrite'): void {
+function setStorage<T>(key: string, value: T, action: 'merge' | 'overwrite' | 'admin_reset' = 'merge'): void {
   try {
     lastMutationTime = Date.now();
     localStorage.setItem(key, JSON.stringify(value));
@@ -279,49 +279,53 @@ let autoSyncInterval: any = null;
 
 // Initialize seed data if empty and sync with cloud backend
 export function initializeAppData(): void {
-  if (!localStorage.getItem(KEYS.FAMILIES)) {
-    setStorage(KEYS.FAMILIES, INITIAL_FAMILIES);
+  // Safe local initialization without sending destructive empty overwrite to server
+  if (localStorage.getItem(KEYS.FAMILIES) === null) {
+    localStorage.setItem(KEYS.FAMILIES, JSON.stringify(INITIAL_FAMILIES));
   }
-  if (!localStorage.getItem(KEYS.MANDOUBS)) {
-    setStorage(KEYS.MANDOUBS, INITIAL_MANDOUBS);
+  if (localStorage.getItem(KEYS.MANDOUBS) === null) {
+    localStorage.setItem(KEYS.MANDOUBS, JSON.stringify(INITIAL_MANDOUBS));
   }
-  if (!localStorage.getItem(KEYS.ADMINS)) {
-    setStorage(KEYS.ADMINS, INITIAL_ADMINS);
+  if (localStorage.getItem(KEYS.ADMINS) === null) {
+    localStorage.setItem(KEYS.ADMINS, JSON.stringify(INITIAL_ADMINS));
   }
-  if (!localStorage.getItem(KEYS.ORDERS)) {
-    setStorage(KEYS.ORDERS, INITIAL_ORDERS);
+  if (localStorage.getItem(KEYS.ORDERS) === null) {
+    localStorage.setItem(KEYS.ORDERS, JSON.stringify(INITIAL_ORDERS));
   }
-  if (!localStorage.getItem(KEYS.BLOCKED_PHONES)) {
-    setStorage(KEYS.BLOCKED_PHONES, INITIAL_BLOCKED_PHONES);
+  if (localStorage.getItem(KEYS.BLOCKED_PHONES) === null) {
+    localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify(INITIAL_BLOCKED_PHONES));
   }
 
-  // Trigger sync with server database
+  // Trigger sync with server database immediately
   syncWithServer();
 
   if (!autoSyncInterval && typeof window !== 'undefined') {
     autoSyncInterval = setInterval(() => {
       syncWithServer();
-    }, 1000);
+    }, 2500);
   }
 }
 
-// Reset data except Admins & preserve orders history as explicitly requested
+// Reset ALL data (families, mandoubs, orders, renewals, history) except Admins
 export function resetDatabaseExceptAdmins(): void {
-  // Preserve ORDERS history & previous records as explicitly requested!
-  const currentOrders = getStorage<Order[]>(KEYS.ORDERS, []);
-
   localStorage.setItem(KEYS.FAMILIES, JSON.stringify([]));
   localStorage.setItem(KEYS.MANDOUBS, JSON.stringify([]));
   localStorage.setItem(KEYS.RENEWALS, JSON.stringify([]));
   localStorage.setItem(KEYS.BLOCKED_PHONES, JSON.stringify([]));
-  // Keep orders records intact!
-  localStorage.setItem(KEYS.ORDERS, JSON.stringify(currentOrders));
+  localStorage.setItem(KEYS.ORDERS, JSON.stringify([]));
 
-  pushToServer('overwrite');
+  // Clear customer or mandoub session if active
+  const session = getSavedSession();
+  if (session.role !== 'admin') {
+    clearSession();
+  }
 
+  // Notify backend with explicit admin_reset action
   if (typeof fetch !== 'undefined') {
     fetch('/api/db/reset', { method: 'POST' }).catch(() => {});
   }
+
+  pushToServer('admin_reset');
 
   window.dispatchEvent(new Event('khobza_data_change'));
 }
@@ -792,15 +796,36 @@ export function getMandoubById(id: string): Mandoub | undefined {
   return getMandoubs().find((m) => m.id === id);
 }
 
-export function authenticateMandoub(username: string, pass: string): Mandoub | undefined {
-  const cleanUser = username.trim().toLowerCase();
-  const cleanPass = pass.trim();
+export function authenticateMandoub(identifier: string, pass: string): Mandoub | undefined {
+  const rawId = String(identifier || '').trim();
+  const cleanId = normalizeDigits(rawId).toLowerCase();
+  const idDigits = cleanId.replace(/\D/g, '');
+  const rawPass = String(pass || '').trim();
+  const cleanPass = normalizeDigits(rawPass);
+
   const mandoubs = getMandoubs();
-  return mandoubs.find(
-    (m) =>
-      m.username.trim().toLowerCase() === cleanUser &&
-      (m.password === pass || m.password.trim() === cleanPass)
-  );
+  return mandoubs.find((m) => {
+    const mUser = normalizeDigits(m.username || '').toLowerCase();
+    const mName = normalizeDigits(m.name || '').toLowerCase();
+    const mPhone = normalizeDigits(m.phone || '').replace(/\D/g, '');
+    const mVlan = normalizeDigits(m.vlanCode || '').toLowerCase();
+
+    const userMatch =
+      mUser === cleanId ||
+      mUser === rawId.toLowerCase() ||
+      (mPhone && idDigits && mPhone === idDigits) ||
+      (mPhone && (cleanId === mPhone || rawId === m.phone)) ||
+      mName === cleanId ||
+      mName === rawId.toLowerCase() ||
+      mVlan === cleanId ||
+      mVlan === rawId.toLowerCase();
+
+    const mPass = String(m.password || '').trim();
+    const mPassClean = normalizeDigits(mPass);
+    const passMatch = mPass === rawPass || mPassClean === cleanPass || mPass === cleanPass;
+
+    return userMatch && passMatch;
+  });
 }
 
 export function saveMandoub(data: Omit<Mandoub, 'id'> & { id?: string }): Mandoub {
@@ -847,15 +872,130 @@ export function getAdminAccounts(): AdminUser[] {
   return getStorage<AdminUser[]>(KEYS.ADMINS, INITIAL_ADMINS);
 }
 
-export function authenticateAdmin(username: string, pass: string): AdminUser | undefined {
-  const cleanUser = username.trim().toLowerCase();
-  const cleanPass = pass.trim();
+export function authenticateAdmin(identifier: string, pass: string): AdminUser | undefined {
+  const rawId = String(identifier || '').trim();
+  const cleanId = normalizeDigits(rawId).toLowerCase();
+  const rawPass = String(pass || '').trim();
+  const cleanPass = normalizeDigits(rawPass);
+
   const admins = getAdminAccounts();
-  return admins.find(
-    (a) =>
-      a.username.trim().toLowerCase() === cleanUser &&
-      (a.password === pass || a.password.trim() === cleanPass)
-  );
+  return admins.find((a) => {
+    const aUser = normalizeDigits(a.username || '').toLowerCase();
+    const aName = normalizeDigits(a.fullName || '').toLowerCase();
+    const aPass = String(a.password || '').trim();
+    const aPassClean = normalizeDigits(aPass);
+
+    const userMatch =
+      aUser === cleanId ||
+      aUser === rawId.toLowerCase() ||
+      aName === cleanId ||
+      aName === rawId.toLowerCase();
+
+    const passMatch = aPass === rawPass || aPassClean === cleanPass || aPass === cleanPass;
+
+    return userMatch && passMatch;
+  });
+}
+
+// Comprehensive asynchronous login that syncs with cloud and queries server if needed
+export async function loginStaff(
+  identifier: string,
+  pass: string
+): Promise<{
+  success: boolean;
+  role?: UserRole;
+  user?: Mandoub | AdminUser;
+  error?: string;
+}> {
+  const rawId = String(identifier || '').trim();
+  const rawPass = String(pass || '').trim();
+
+  if (!rawId || !rawPass) {
+    return { success: false, error: 'يرجى إدخال اسم المستخدم وكلمة السر' };
+  }
+
+  // 1. Force instant cloud sync with server
+  try {
+    await syncWithServer(true);
+  } catch (err) {
+    // continue
+  }
+
+  // 2. Check Admin locally
+  const admin = authenticateAdmin(rawId, rawPass);
+  if (admin) {
+    saveSession({ role: 'admin', adminId: admin.id });
+    return { success: true, role: 'admin', user: admin };
+  }
+
+  // 3. Check Mandoub locally
+  const mandoub = authenticateMandoub(rawId, rawPass);
+  if (mandoub) {
+    if (mandoub.status === 'disabled' || mandoub.status === 'inactive') {
+      return {
+        success: false,
+        error: 'عذراً، تم تعطيل حساب المندوب هذا من قبل الإدارة. يرجى التواصل مع مسؤول النظام.',
+      };
+    }
+    saveSession({ role: 'mandoub', mandoubId: mandoub.id });
+    return { success: true, role: 'mandoub', user: mandoub };
+  }
+
+  // 4. Fallback: Query direct /api/auth/staff server endpoint in case local storage was behind
+  try {
+    const response = await fetch('/api/auth/staff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: rawId, password: rawPass }),
+    });
+
+    const result = await response.json();
+    if (response.ok && result.success && result.user) {
+      if (result.role === 'admin') {
+        const adminUser = result.user as AdminUser;
+        const currentAdmins = getAdminAccounts();
+        if (!currentAdmins.some((a) => a.id === adminUser.id)) {
+          setStorage(KEYS.ADMINS, [...currentAdmins, adminUser]);
+        }
+        saveSession({ role: 'admin', adminId: adminUser.id });
+        return { success: true, role: 'admin', user: adminUser };
+      } else if (result.role === 'mandoub') {
+        const mandoubUser = result.user as Mandoub;
+        const currentMandoubs = getMandoubs();
+        if (!currentMandoubs.some((m) => m.id === mandoubUser.id)) {
+          setStorage(KEYS.MANDOUBS, [...currentMandoubs, mandoubUser]);
+        }
+        saveSession({ role: 'mandoub', mandoubId: mandoubUser.id });
+        return { success: true, role: 'mandoub', user: mandoubUser };
+      }
+    } else if (result.message) {
+      return { success: false, error: result.message };
+    }
+  } catch (err) {
+    console.warn('Direct server auth fetch warning:', err);
+  }
+
+  // 5. Detect if username was correct but password wrong in local state
+  const cleanId = normalizeDigits(rawId).toLowerCase();
+  const idDigits = cleanId.replace(/\D/g, '');
+  const allMandoubs = getMandoubs();
+  const foundMandoubWrongPass = allMandoubs.find((m) => {
+    const mUser = normalizeDigits(m.username || '').toLowerCase();
+    const mPhone = normalizeDigits(m.phone || '').replace(/\D/g, '');
+    return mUser === cleanId || (mPhone && idDigits && mPhone === idDigits);
+  });
+
+  if (foundMandoubWrongPass) {
+    return {
+      success: false,
+      error: 'كلمة السر غير صحيحة. يرجى التأكد من كتابة كلمة السر بدقة',
+    };
+  }
+
+  return {
+    success: false,
+    error: 'اسم المستخدم أو كلمة السر غير صحيحة. يرجى مراجعة الإدارة للتأكد من الحساب.',
+  };
 }
 
 export function saveAdminAccount(data: Omit<AdminUser, 'id'> & { id?: string }): AdminUser {

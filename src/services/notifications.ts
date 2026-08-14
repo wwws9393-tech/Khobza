@@ -1,5 +1,8 @@
 // Browser Native System Notification Service with Web Audio Sound Chime for Khobza App
 import { getSavedSession } from './storage';
+import { broadcastExternalPush } from './pushService';
+import { sendFcmNotification } from './fcmService';
+import { sendCloudflarePush } from './cloudflarePushService';
 
 // Web Audio API Synthesizer for Loud Mobile Notification Chime Sound (Background only)
 export function playNotificationChimeSound(force: boolean = false): void {
@@ -174,6 +177,28 @@ export function sendBrowserNotification(
       );
     } catch (e) {}
   }
+
+  // Dispatch to external Cloudflare Edge, FCM & WebPush when app might be closed in background
+  try {
+    broadcastExternalPush({
+      title,
+      body,
+      targetRole: options?.targetRole,
+      orderId: options?.orderId,
+    }).catch(() => {});
+    sendFcmNotification({
+      title,
+      body,
+      targetRole: options?.targetRole,
+      orderId: options?.orderId,
+    }).catch(() => {});
+    sendCloudflarePush({
+      title,
+      body,
+      targetRole: options?.targetRole,
+      orderId: options?.orderId,
+    }).catch(() => {});
+  } catch (e) {}
 
   // Dispatch Native OS Mobile System Tray Notification (Android & iOS PWA Safari)
   try {

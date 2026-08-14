@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   AdminUser,
   Family,
@@ -216,6 +216,10 @@ export default function App() {
     }
   };
 
+  const handleSplashComplete = useCallback(() => {
+    setShowSplash(false);
+  }, []);
+
   // Handle Logout
   const handleLogout = () => {
     clearSession();
@@ -318,8 +322,8 @@ export default function App() {
         />
       )}
 
-      {/* 3-Second Modern Animated Splash Screen */}
-      {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
+      {/* Modern Animated Splash Screen */}
+      {showSplash && <SplashScreen onComplete={handleSplashComplete} />}
 
       {/* Mandatory Update Modal */}
       {showUpdateModal && updateCheckResult?.hasUpdate && (

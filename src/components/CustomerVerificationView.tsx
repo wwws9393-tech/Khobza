@@ -5,6 +5,7 @@ import {
   isPhoneBlocked,
   saveSession,
   updateFamilyLocation,
+  normalizeDigits,
 } from '../services/storage';
 import { requestNotificationPermission } from '../services/notifications';
 import { Phone, CheckCircle2, UserCheck, MapPin, Sparkles, AlertCircle, Smartphone, Download } from 'lucide-react';
@@ -198,9 +199,9 @@ export const CustomerVerificationView: React.FC<Props> = ({
                 type="tel"
                 maxLength={11}
                 value={phone}
-                onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
+                onChange={(e) => setPhone(normalizeDigits(e.target.value).replace(/\D/g, '').slice(0, 11))}
                 placeholder="مثال: 07700000000"
-                className="w-full pl-11 pr-4 py-3.5 bg-stone-50 border border-stone-300 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500/30 focus:border-amber-500 text-stone-900 font-bold placeholder-stone-400 text-base text-right transition-all"
+                className="w-full pl-11 pr-4 py-3.5 bg-stone-50 border border-stone-300 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500/30 focus:border-amber-500 text-stone-900 font-bold placeholder-stone-400 text-base text-right transition-all font-mono"
                 dir="rtl"
               />
               <Phone className="w-5 h-5 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />

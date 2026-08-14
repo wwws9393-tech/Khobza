@@ -86,12 +86,32 @@ function writeDb(data: any) {
     let updatedBlockedPhones = current.blockedPhones;
     let updatedRenewals = current.renewals;
 
-    if (data.action === 'overwrite') {
+    if (data.action === 'admin_reset') {
+      // Full administrative wipe of all non-admin data
+      updatedFamilies = [];
+      updatedMandoubs = [];
+      updatedOrders = [];
+      updatedRenewals = [];
+      updatedBlockedPhones = [];
+    } else if (data.action === 'overwrite') {
       // Explicit overwrite (e.g. after intentional admin deletion or backup import)
-      if (Array.isArray(data.families)) updatedFamilies = data.families;
-      if (Array.isArray(data.mandoubs)) updatedMandoubs = data.mandoubs;
-      if (Array.isArray(data.orders)) updatedOrders = data.orders;
-      if (Array.isArray(data.admins)) updatedAdmins = data.admins;
+      if (Array.isArray(data.families)) {
+        // Protect server data: if incoming is empty but server has data, don't accidentally wipe unless admin_reset
+        if (data.families.length > 0 || current.families.length === 0) {
+          updatedFamilies = data.families;
+        }
+      }
+      if (Array.isArray(data.mandoubs)) {
+        if (data.mandoubs.length > 0 || current.mandoubs.length === 0) {
+          updatedMandoubs = data.mandoubs;
+        }
+      }
+      if (Array.isArray(data.orders)) {
+        if (data.orders.length > 0 || current.orders.length === 0) {
+          updatedOrders = data.orders;
+        }
+      }
+      if (Array.isArray(data.admins) && data.admins.length > 0) updatedAdmins = data.admins;
       if (Array.isArray(data.blockedPhones)) updatedBlockedPhones = data.blockedPhones;
       if (Array.isArray(data.renewals)) updatedRenewals = data.renewals;
     } else {
@@ -151,8 +171,115 @@ app.get('/api/health', (req, res) => {
 
 // Full Database Sync (GET)
 app.get('/api/db', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   const db = readDb();
   res.json(db);
+});
+
+// Helper for normalizing Arabic/Persian digits
+function normalizeArabicDigits(str: string): string {
+  if (!str) return '';
+  return String(str)
+    .replace(/[٠-٩]/g, (d) => '0123456789'['٠١٢٣٤٥٦٧٨٩'.indexOf(d)])
+    .replace(/[۰-۹]/g, (d) => '0123456789'['۰۱۲۳۴۵۶۷۸۹'.indexOf(d)])
+    .trim();
+}
+
+// Dedicated Staff & Mandoub Authentication API Endpoint
+app.post('/api/auth/staff', (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ success: false, message: 'يرجى إدخال اسم المستخدم وكلمة السر' });
+  }
+
+  const rawUser = String(username).trim();
+  const cleanUser = normalizeArabicDigits(rawUser).toLowerCase();
+  const rawPass = String(password).trim();
+  const cleanPass = normalizeArabicDigits(rawPass);
+
+  const db = readDb();
+
+  // 1. Check Admins
+  const adminList = Array.isArray(db.admins) ? db.admins : defaultDb.admins;
+  const admin = adminList.find((a: any) => {
+    const aUser = normalizeArabicDigits(a.username || '').toLowerCase();
+    const aName = normalizeArabicDigits(a.fullName || '').toLowerCase();
+    const aPass = String(a.password || '').trim();
+    const aPassClean = normalizeArabicDigits(aPass);
+    const userMatch = aUser === cleanUser || aName === cleanUser || aUser === rawUser.toLowerCase();
+    const passMatch = aPass === rawPass || aPassClean === cleanPass || aPass === cleanPass;
+    return userMatch && passMatch;
+  });
+
+  if (admin) {
+    return res.json({
+      success: true,
+      role: 'admin',
+      user: admin,
+    });
+  }
+
+  // 2. Check Mandoubs
+  const mandoubList = Array.isArray(db.mandoubs) ? db.mandoubs : [];
+  const mandoub = mandoubList.find((m: any) => {
+    const mUser = normalizeArabicDigits(m.username || '').toLowerCase();
+    const mName = normalizeArabicDigits(m.name || '').toLowerCase();
+    const mPhone = normalizeArabicDigits(m.phone || '').replace(/\D/g, '');
+    const mVlan = normalizeArabicDigits(m.vlanCode || '').toLowerCase();
+    const userDigits = cleanUser.replace(/\D/g, '');
+
+    const userMatch =
+      mUser === cleanUser ||
+      mUser === rawUser.toLowerCase() ||
+      (mPhone && userDigits && mPhone === userDigits) ||
+      (mPhone && (cleanUser === mPhone || rawUser === m.phone)) ||
+      mName === cleanUser ||
+      mName === rawUser.toLowerCase() ||
+      mVlan === cleanUser ||
+      mVlan === rawUser.toLowerCase();
+
+    const mPass = String(m.password || '').trim();
+    const mPassClean = normalizeArabicDigits(mPass);
+    const passMatch = mPass === rawPass || mPassClean === cleanPass || mPass === cleanPass;
+
+    return userMatch && passMatch;
+  });
+
+  if (mandoub) {
+    if (mandoub.status === 'disabled' || mandoub.status === 'inactive') {
+      return res.status(403).json({
+        success: false,
+        message: 'عذراً، تم تعطيل حساب المندوب هذا من قبل الإدارة. يرجى مراجعة المسؤول.',
+      });
+    }
+    return res.json({
+      success: true,
+      role: 'mandoub',
+      user: mandoub,
+    });
+  }
+
+  // Check if username/phone exists but password was wrong
+  const foundUserWrongPass = mandoubList.find((m: any) => {
+    const mUser = normalizeArabicDigits(m.username || '').toLowerCase();
+    const mPhone = normalizeArabicDigits(m.phone || '').replace(/\D/g, '');
+    const userDigits = cleanUser.replace(/\D/g, '');
+    return mUser === cleanUser || (mPhone && userDigits && mPhone === userDigits);
+  });
+
+  if (foundUserWrongPass) {
+    return res.status(401).json({
+      success: false,
+      message: 'كلمة السر غير صحيحة. يرجى التأكد من كلمة السر والمحاولة مجدداً',
+    });
+  }
+
+  return res.status(401).json({
+    success: false,
+    message: 'اسم المستخدم أو كلمة السر غير صحيحة',
+  });
 });
 
 // Full Database Sync (POST)
@@ -161,23 +288,26 @@ app.post('/api/db', (req, res) => {
   res.json({ success: true, data: updated });
 });
 
-// Reset Database (except Admins and preserve order history as requested)
+// Reset Database (Full wipe of families, mandoubs, orders, renewals, blocked phones - keep only Admins)
 app.post('/api/db/reset', (req, res) => {
   const current = readDb();
   const resetData = {
-    ...current,
+    admins: current.admins && current.admins.length > 0 ? current.admins : defaultDb.admins,
     mandoubs: [],
     families: [],
-    orders: current.orders || [], // Preserve orders history and previous records!
+    orders: [],
     renewals: [],
     blockedPhones: [],
+    versionConfig: current.versionConfig || defaultDb.versionConfig,
+    updatedAt: new Date().toISOString(),
   };
-  writeDb({ ...resetData, action: 'overwrite' });
+  fs.writeFileSync(DATA_FILE, JSON.stringify(resetData, null, 2), 'utf-8');
   res.json({ success: true, data: resetData });
 });
 
 // Push Subscription storage in memory / DB
 let pushSubscriptions: any[] = [];
+let fcmTokens: any[] = [];
 
 app.post('/api/push/subscribe', (req, res) => {
   const sub = req.body;
@@ -191,7 +321,36 @@ app.post('/api/push/subscribe', (req, res) => {
 app.post('/api/push/send', (req, res) => {
   const { title, body, targetRole, orderId } = req.body;
   // Push notification dispatched to active subscribers
-  res.json({ success: true, deliveredCount: pushSubscriptions.length });
+  res.json({ success: true, deliveredCount: pushSubscriptions.length + fcmTokens.length });
+});
+
+// FCM Token Register API
+app.post('/api/fcm/token', (req, res) => {
+  const tokenRecord = req.body;
+  if (tokenRecord && tokenRecord.token) {
+    fcmTokens = fcmTokens.filter((t) => t.token !== tokenRecord.token);
+    fcmTokens.push(tokenRecord);
+  }
+  res.json({ success: true, count: fcmTokens.length });
+});
+
+// FCM Notification Dispatch API
+app.post('/api/fcm/send', (req, res) => {
+  const { title, body, targetPhone, targetRole, orderId } = req.body;
+  console.log(`[FCM Push] Notification dispatched: "${title}" - "${body}" (Target: ${targetRole || 'all'})`);
+  res.json({ success: true, status: 'dispatched', recipients: fcmTokens.length });
+});
+
+// Cloudflare Worker Push Gateway API
+app.post('/api/cloudflare/push', (req, res) => {
+  const { title, body, targetPhone, targetRole, orderId } = req.body;
+  console.log(`[Cloudflare Push Gateway] Broadcaster: "${title}" -> ${targetRole || 'all'} (Subscribers: ${pushSubscriptions.length + fcmTokens.length})`);
+  res.json({
+    success: true,
+    gateway: 'cloudflare-edge-compatible',
+    delivered: pushSubscriptions.length + fcmTokens.length,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 

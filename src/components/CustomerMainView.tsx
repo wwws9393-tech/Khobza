@@ -11,6 +11,7 @@ import {
 } from '../services/storage';
 import { sendBrowserNotification } from '../services/notifications';
 import { registerPushSubscription } from '../services/pushService';
+import { registerFcmToken } from '../services/fcmService';
 
 import {
   Calendar,
@@ -201,6 +202,9 @@ export const CustomerMainView: React.FC<Props> = ({
   };
 
   useEffect(() => {
+    if (family?.phone) {
+      registerFcmToken(family.phone, 'family', family.vlanCode).catch(() => {});
+    }
     loadOrders();
     const handleStorageChange = () => loadOrders();
     window.addEventListener('khobza_data_change', handleStorageChange);

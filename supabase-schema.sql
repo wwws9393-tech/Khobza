@@ -143,7 +143,18 @@ CREATE TABLE IF NOT EXISTS public.push_subscriptions (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 10. Enable Row Level Security (RLS) & Grant Access
+-- 10. Firebase Cloud Messaging (FCM) Tokens Table (جدول توكنات إشعارات فايربيس السحابية للهواتف)
+CREATE TABLE IF NOT EXISTS public.fcm_tokens (
+    token TEXT PRIMARY KEY,
+    user_phone TEXT,
+    role TEXT NOT NULL, -- 'family', 'mandoub', 'admin'
+    vlan_code TEXT,
+    platform TEXT NOT NULL DEFAULT 'android', -- 'ios', 'android', 'desktop'
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 11. Enable Row Level Security (RLS) & Grant Access
 ALTER TABLE public.families ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.mandoubs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.admins ENABLE ROW LEVEL SECURITY;
@@ -152,6 +163,7 @@ ALTER TABLE public.renewals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.blocked_phones ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.app_config ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.push_subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.fcm_tokens ENABLE ROW LEVEL SECURITY;
 
 -- Allow Public Access via Anon Key for Applet
 CREATE POLICY "Allow public read-write for families" ON public.families FOR ALL USING (true) WITH CHECK (true);
@@ -162,6 +174,7 @@ CREATE POLICY "Allow public read-write for renewals" ON public.renewals FOR ALL 
 CREATE POLICY "Allow public read-write for blocked_phones" ON public.blocked_phones FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow public read-write for app_config" ON public.app_config FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow public read-write for push_subscriptions" ON public.push_subscriptions FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow public read-write for fcm_tokens" ON public.fcm_tokens FOR ALL USING (true) WITH CHECK (true);
 
 -- Enable Realtime publication for tables
 ALTER PUBLICATION supabase_realtime ADD TABLE public.families;
@@ -169,3 +182,4 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.mandoubs;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.orders;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.renewals;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.app_config;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.fcm_tokens;

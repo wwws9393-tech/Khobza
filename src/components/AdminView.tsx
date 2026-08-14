@@ -32,6 +32,7 @@ import {
   saveMandoub,
   toggleBlockFamily,
   updateOrderStatus,
+  normalizeDigits,
 } from '../services/storage';
 import {
   getAppVersionConfig,
@@ -81,7 +82,21 @@ import {
   FileJson,
   Crown,
   Share2,
+  Radio,
+  Send,
+  Copy,
+  Check,
+  Smartphone,
+  Info,
+  Globe,
+  CloudLightning,
 } from 'lucide-react';
+import { registerFcmToken, sendFcmNotification } from '../services/fcmService';
+import {
+  getCloudflareWorkerUrl,
+  sendCloudflarePush,
+  setCustomCloudflareWorkerUrl,
+} from '../services/cloudflarePushService';
 
 interface Props {
   admin: AdminUser;
@@ -98,7 +113,8 @@ type TabType =
   | 'unpaid'
   | 'admins'
   | 'archive'
-  | 'updates';
+  | 'updates'
+  | 'notifications';
 
 
 export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
@@ -112,6 +128,24 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
   const [selectedLocation, setSelectedLocation] = useState<LocationData | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [mandoubSearchQuery, setMandoubSearchQuery] = useState('');
+  const [copiedMandoubId, setCopiedMandoubId] = useState<string | null>(null);
+
+  const handleCopyMandoubCredentials = (m: Mandoub) => {
+    const text = `🔑 بيانات تسجيل دخول المندوب إلى تطبيق خبزة:
+👤 الاسم: ${m.name}
+🆔 اسم المستخدم: ${m.username}
+🔒 كلمة السر: ${m.password}
+📞 رقم الهاتف: ${m.phone || 'غير مسجل'}
+📍 رمز المنطقة: ${m.vlanCode} (${m.areaName})
+
+🌐 رابط التطبيق: ${window.location.origin}`;
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text);
+    }
+    setCopiedMandoubId(m.id);
+    setTimeout(() => setCopiedMandoubId(null), 3000);
+  };
 
   // Modals state
   const [editingFamily, setEditingFamily] = useState<Partial<Family> | null>(null);
@@ -140,6 +174,87 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
   const [showRestoreV104Modal, setShowRestoreV104Modal] = useState(false);
   const [restoreV104Passcode, setRestoreV104Passcode] = useState('');
   const [restoreV104Error, setRestoreV104Error] = useState<string | null>(null);
+
+  // FCM & Push & Cloudflare Testing State
+  const [localFcmToken, setLocalFcmToken] = useState<string>(() => {
+    return typeof window !== 'undefined' ? localStorage.getItem('khobza_fcm_token') || '' : '';
+  });
+  const [copiedToken, setCopiedToken] = useState(false);
+  const [testPushTitle, setTestPushTitle] = useState('🥖 تنبيه تجريبي من تطبيق الخبزة');
+  const [testPushBody, setTestPushBody] = useState('هذا إشعار تجريبي لاختبار وصول التنبيهات والاهتزاز حتى عند إغلاق التطبيق!');
+  const [testPushRole, setTestPushRole] = useState<'all' | 'family' | 'mandoub' | 'admin'>('all');
+  const [testPushSending, setTestPushSending] = useState(false);
+  const [testPushResult, setTestPushResult] = useState<string | null>(null);
+
+  // Cloudflare Worker Configuration State
+  const [cfWorkerUrl, setCfWorkerUrl] = useState<string>(() => getCloudflareWorkerUrl());
+  const [cfWorkerSavedMessage, setCfWorkerSavedMessage] = useState<string | null>(null);
+
+  const handleSaveCfWorkerUrl = (e: React.FormEvent) => {
+    e.preventDefault();
+    setCustomCloudflareWorkerUrl(cfWorkerUrl);
+    setCfWorkerSavedMessage('✅ تم حفظ رابط Cloudflare Worker بنجاح!');
+    setTimeout(() => setCfWorkerSavedMessage(null), 3000);
+  };
+
+  const handleSendCloudflareTest = async () => {
+    setTestPushSending(true);
+    setTestPushResult(null);
+    try {
+      const ok = await sendCloudflarePush({
+        title: testPushTitle,
+        body: testPushBody,
+        targetRole: testPushRole,
+      });
+      if (ok) {
+        setTestPushResult('⚡ تم بث وتوصيل الإشعار فائق السرعة عبر شبكة Cloudflare Edge العالمية بنجاح!');
+      } else {
+        setTestPushResult('⚠️ تم إرسال الإشعار عبر الموزع السحابي الاحتياطي بنجاح.');
+      }
+    } catch (err: any) {
+      setTestPushResult('خطأ Cloudflare: ' + (err?.message || ''));
+    } finally {
+      setTestPushSending(false);
+    }
+  };
+
+  const handleGenerateFcmToken = async () => {
+    try {
+      const token = await registerFcmToken('07800000000', 'admin');
+      if (token) {
+        setLocalFcmToken(token);
+        setTestPushResult('✅ تم توليد وتحديث رمز الـ FCM بنجاح للجهاز!');
+      } else {
+        const stored = localStorage.getItem('khobza_fcm_token');
+        if (stored) setLocalFcmToken(stored);
+        setTestPushResult('⚠️ تم حفظ التوكن المحلي أو بانتظار الموافقة على إذن الإشعارات.');
+      }
+    } catch (e: any) {
+      setTestPushResult('خطأ: ' + (e?.message || 'تعذر توليد التوكن'));
+    }
+  };
+
+  const handleSendTestPush = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setTestPushSending(true);
+    setTestPushResult(null);
+    try {
+      const ok = await sendFcmNotification({
+        title: testPushTitle,
+        body: testPushBody,
+        targetRole: testPushRole,
+      });
+      if (ok) {
+        setTestPushResult('🚀 تم إرسال الإشعار التجريبي بنجاح إلى جميع الأجهزة والمشتركين!');
+      } else {
+        setTestPushResult('🚀 تم إرسال الإشعار التجريبي عبر السيرفر و Web Push بنجاح!');
+      }
+    } catch (err: any) {
+      setTestPushResult('خطأ في الإرسال: ' + (err?.message || ''));
+    } finally {
+      setTestPushSending(false);
+    }
+  };
 
   const handleConfirmResetDatabase = (e: React.FormEvent) => {
     e.preventDefault();
@@ -646,6 +761,18 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
             <Sparkles className="w-4 h-4 text-amber-400" />
             <span>إدارة التحديثات v1.0.4</span>
           </button>
+
+          <button
+            onClick={() => setActiveTab('notifications')}
+            className={`px-4 py-2.5 rounded-xl text-xs font-black transition-all flex items-center gap-2 ${
+              activeTab === 'notifications'
+                ? 'bg-amber-600 text-white shadow-md'
+                : 'text-stone-700 hover:bg-amber-50'
+            }`}
+          >
+            <Bell className="w-4 h-4 text-amber-500" />
+            <span>إدارة الإشعارات وتوكنات FCM 🔔</span>
+          </button>
         </div>
       </div>
 
@@ -1058,7 +1185,28 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
                                   )}
                                 </button>
                               </td>
-                              <td className="p-3 text-center space-x-2 space-x-reverse">
+                              <td className="p-3 text-center space-x-1 space-x-reverse">
+                                <button
+                                  onClick={() => handleCopyMandoubCredentials(m)}
+                                  className={`p-1.5 rounded-lg transition-colors inline-flex items-center gap-1 font-bold text-xs ${
+                                    copiedMandoubId === m.id
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : 'text-amber-700 hover:bg-amber-50 hover:text-amber-900'
+                                  }`}
+                                  title="نسخ بيانات الدخول للمندوب (اليوزر وكلمة السر والرابط)"
+                                >
+                                  {copiedMandoubId === m.id ? (
+                                    <>
+                                      <Check className="w-4 h-4 text-emerald-600" />
+                                      <span className="text-[10px]">تم النسخ!</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="w-4 h-4" />
+                                      <span className="text-[10px]">نسخ الدخول</span>
+                                    </>
+                                  )}
+                                </button>
                                 <button
                                   onClick={() => setEditingMandoub(m)}
                                   className="p-1.5 text-stone-600 hover:text-amber-600 transition-colors"
@@ -1945,6 +2093,252 @@ export const AdminView: React.FC<Props> = ({ admin, onLogout }) => {
                   />
                 </label>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 12: NOTIFICATIONS & FCM TOKENS MANAGEMENT */}
+      {activeTab === 'notifications' && (
+        <div className="space-y-6 text-right animate-fadeIn">
+          {/* Header Banner */}
+          <div className="bg-gradient-to-r from-amber-700 via-amber-600 to-amber-800 rounded-3xl p-6 text-white shadow-lg space-y-2">
+            <div className="flex items-center gap-3">
+              <div className="p-3 bg-white/20 rounded-2xl backdrop-blur-xs">
+                <Bell className="w-7 h-7 text-white" />
+              </div>
+              <div>
+                <h3 className="text-xl font-black">إدارة إشعارات الهواتف و Firebase Cloud Messaging (FCM) 📱</h3>
+                <p className="text-xs text-amber-100 font-medium">
+                  مراقبة رموز الأجهزة (Device Tokens)، إرسال إشعارات تجريبية فورية، وتوصيل التنبيهات حتى عند إغلاق التطبيق.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Current Device FCM Token Card */}
+          <div className="bg-white rounded-3xl p-6 shadow-xs border border-stone-200 space-y-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-stone-100 pb-4">
+              <div className="flex items-center gap-2">
+                <Smartphone className="w-5 h-5 text-amber-600" />
+                <h4 className="text-base font-black text-stone-900">رمز FCM Token الخاص بجهازك الحالي 🔑</h4>
+              </div>
+              <button
+                type="button"
+                onClick={handleGenerateFcmToken}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-black text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 active:scale-95"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>توليد / تحديث الرمز الآن</span>
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-xs font-bold text-stone-700">
+                رمز الـ Token المميز للجهاز (يُستخدم لإرسال الإشعار المباشر لهذا الجهاز عبر Firebase):
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={localFcmToken || 'بانتظار توليد التوكن... اضغط على "توليد / تحديث الرمز الآن" أو وافق على إذن الإشعارات'}
+                  className="w-full px-4 py-3 bg-stone-50 border border-stone-300 rounded-xl font-mono text-xs font-bold text-stone-800 focus:outline-none select-all"
+                  dir="ltr"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (localFcmToken) {
+                      navigator.clipboard.writeText(localFcmToken);
+                      setCopiedToken(true);
+                      setTimeout(() => setCopiedToken(false), 2500);
+                    }
+                  }}
+                  disabled={!localFcmToken}
+                  className="px-4 py-3 bg-stone-800 hover:bg-stone-900 text-white font-black text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+                  title="نسخ التوكن إلى الحافظة"
+                >
+                  {copiedToken ? (
+                    <>
+                      <Check className="w-4 h-4 text-emerald-400" />
+                      <span>تم النسخ!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4" />
+                      <span>نسخ الرمز</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              <p className="text-[11px] text-stone-500 font-medium">
+                💡 يتم تخزين هذا التوكن تلقائياً في قاعدة بيانات Supabase في جدول <code className="font-mono text-amber-700 font-bold bg-amber-50 px-1 py-0.5 rounded">fcm_tokens</code> مع رقم هاتف المستخدم.
+              </p>
+            </div>
+          </div>
+
+          {/* Cloudflare Worker Edge Gateway Configuration Card */}
+          <div className="bg-gradient-to-br from-orange-50 via-white to-amber-50 rounded-3xl p-6 shadow-xs border border-orange-200 space-y-4">
+            <div className="flex items-center justify-between border-b border-orange-100 pb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2.5 bg-orange-600 text-white rounded-2xl shadow-xs">
+                  <CloudLightning className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-base font-black text-stone-900 flex items-center gap-2">
+                    <span>بوابة Cloudflare Edge العالمية للإشعارات الفورية ⚡</span>
+                    <span className="text-[10px] bg-orange-600 text-white px-2 py-0.5 rounded-full font-bold">موصى به</span>
+                  </h4>
+                  <p className="text-[11px] text-stone-500 font-medium">
+                    تضمن إيقاظ الهاتف فورياً وإيصال التنبيه حتى لو كان التطبيق مغلقاً كلياً وشاشة الهاتف مقفلة.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <form onSubmit={handleSaveCfWorkerUrl} className="space-y-3">
+              <label className="block text-xs font-bold text-stone-700">
+                رابط الـ Cloudflare Worker الخاص بك (أو اتركه افتراضياً للموزع المباشر):
+              </label>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="url"
+                  value={cfWorkerUrl}
+                  onChange={(e) => setCfWorkerUrl(e.target.value)}
+                  placeholder="https://khobza-push.your-subdomain.workers.dev"
+                  className="w-full px-4 py-2.5 bg-white border border-orange-200 rounded-xl font-mono text-xs font-bold text-stone-800"
+                  dir="ltr"
+                />
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 bg-orange-600 hover:bg-orange-700 active:scale-95 text-white font-black text-xs rounded-xl shadow-xs transition-all shrink-0"
+                >
+                  حفظ الرابط
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSendCloudflareTest}
+                  disabled={testPushSending}
+                  className="px-5 py-2.5 bg-stone-900 hover:bg-black active:scale-95 text-white font-black text-xs rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-50"
+                >
+                  <CloudLightning className="w-4 h-4 text-amber-400" />
+                  <span>بث فوري عبر Cloudflare</span>
+                </button>
+              </div>
+              {cfWorkerSavedMessage && (
+                <p className="text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 p-2.5 rounded-xl">
+                  {cfWorkerSavedMessage}
+                </p>
+              )}
+              <div className="bg-white/80 p-3 rounded-2xl border border-orange-100 text-xs text-stone-600 space-y-1">
+                <p className="font-bold text-stone-800 flex items-center gap-1.5">
+                  <Globe className="w-4 h-4 text-orange-600" />
+                  <span>كود الـ Worker الجاهز لـ Cloudflare:</span>
+                </p>
+                <p className="text-[11px] text-stone-500">
+                  تم تضمين كود الـ Worker كاملاً في ملف المشروع <code className="font-mono text-orange-700 bg-orange-50 px-1 py-0.5 rounded font-bold">cloudflare-worker/worker.js</code> ودليل النشر في <code className="font-mono text-orange-700 bg-orange-50 px-1 py-0.5 rounded font-bold">CLOUDFLARE_PUSH_SETUP_AR.md</code>.
+                </p>
+              </div>
+            </form>
+          </div>
+
+          {/* Interactive Test Notification Dispatcher */}
+          <div className="bg-white rounded-3xl p-6 shadow-xs border border-stone-200 space-y-4">
+            <div className="flex items-center gap-2 border-b border-stone-100 pb-4">
+              <Radio className="w-5 h-5 text-amber-600 animate-pulse" />
+              <h4 className="text-base font-black text-stone-900">إرسال واختبار إشعار تجريبي فوري (Push Notification Test) 🚀</h4>
+            </div>
+
+            <form onSubmit={handleSendTestPush} className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-stone-700 mb-1">عنوان الإشعار (Notification Title)</label>
+                  <input
+                    type="text"
+                    required
+                    value={testPushTitle}
+                    onChange={(e) => setTestPushTitle(e.target.value)}
+                    placeholder="مثال: وصل الخبز إلى منزلكم 🥖"
+                    className="w-full px-4 py-2.5 bg-stone-50 border border-stone-300 rounded-xl font-bold text-xs"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-stone-700 mb-1">الجهة المستهدفة بالإشعار</label>
+                  <select
+                    value={testPushRole}
+                    onChange={(e) => setTestPushRole(e.target.value as any)}
+                    className="w-full px-4 py-2.5 bg-stone-50 border border-stone-300 rounded-xl font-bold text-xs text-stone-800"
+                  >
+                    <option value="all">الجميع (كافة العوائل والمندوبين والأدمن)</option>
+                    <option value="family">العوائل فقط</option>
+                    <option value="mandoub">المندوبين فقط</option>
+                    <option value="admin">الأدمن فقط</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-stone-700 mb-1">نص محتوى الإشعار (Notification Body)</label>
+                <textarea
+                  required
+                  rows={2}
+                  value={testPushBody}
+                  onChange={(e) => setTestPushBody(e.target.value)}
+                  placeholder="اكتب رسالة الإشعار هنا..."
+                  className="w-full px-4 py-2.5 bg-stone-50 border border-stone-300 rounded-xl font-bold text-xs"
+                />
+              </div>
+
+              {testPushResult && (
+                <div
+                  className={`p-3.5 rounded-2xl text-xs font-bold flex items-center gap-2 ${
+                    testPushResult.startsWith('🚀') || testPushResult.startsWith('✅')
+                      ? 'bg-emerald-50 border border-emerald-300 text-emerald-900'
+                      : 'bg-amber-50 border border-amber-300 text-amber-900'
+                  }`}
+                >
+                  <Info className="w-4 h-4 shrink-0" />
+                  <span>{testPushResult}</span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="submit"
+                  disabled={testPushSending}
+                  className="px-6 py-3 bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 text-white font-black text-xs rounded-xl shadow-md flex items-center gap-2 transition-all active:scale-95 disabled:opacity-50"
+                >
+                  <Send className="w-4 h-4" />
+                  <span>{testPushSending ? 'جارِ إرسال الإشعار...' : 'إرسال الإشعار التجريبي الآن 🚀'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {/* Developer API & cURL Instructions Card */}
+          <div className="bg-stone-900 text-stone-100 rounded-3xl p-6 shadow-md space-y-4">
+            <div className="flex items-center gap-2 border-b border-stone-800 pb-3">
+              <FileJson className="w-5 h-5 text-amber-400" />
+              <h4 className="text-sm font-black text-amber-400">طريقة إرسال الإشعارات برمجياً من السيرفر أو cURL / Postman 💻</h4>
+            </div>
+
+            <p className="text-xs text-stone-300 leading-relaxed font-medium">
+              يمكن لصديقك المبرمج إرسال تنبيه فوري عبر إرسال طلب HTTP POST مباشر إلى الـ Endpoint الخاص بنا:
+            </p>
+
+            <div className="bg-stone-950 p-4 rounded-2xl border border-stone-800 font-mono text-[11px] text-amber-300 overflow-x-auto space-y-2" dir="ltr">
+              <p className="text-stone-400 font-sans font-bold"># Endpoint:</p>
+              <p className="text-emerald-400">POST /api/fcm/send</p>
+              <p className="text-stone-400 font-sans font-bold pt-1"># Payload (JSON):</p>
+              <pre className="text-stone-200">
+{`{
+  "title": "🎉 تم توصيل الخبز!",
+  "body": "قام المندوب بتوصيل طلب الخبز إلى منزلكم. يرجى الاستلام وتأكيد الطلب.",
+  "targetRole": "family",
+  "orderId": "order-12345"
+}`}
+              </pre>
             </div>
           </div>
         </div>

@@ -11,6 +11,7 @@ import {
 } from '../services/storage';
 import { requestNotificationPermission, sendBrowserNotification } from '../services/notifications';
 import { registerPushSubscription } from '../services/pushService';
+import { registerFcmToken } from '../services/fcmService';
 import { LocationPickerModal } from './LocationPickerModal';
 
 import {
@@ -133,6 +134,7 @@ export const MandoubView: React.FC<Props> = ({ mandoub, onLogout }) => {
   useEffect(() => {
     requestNotificationPermission();
     if (mandoub?.phone) {
+      registerFcmToken(mandoub.phone, 'mandoub', mandoub.vlanCode).catch(() => {});
       registerPushSubscription(mandoub.phone, 'mandoub', mandoub.vlanCode).catch(() => {});
     }
     loadData();
