@@ -1067,6 +1067,18 @@ app.get('/api/push/vapid-public-key', (req, res) => {
   res.json({ publicKey: vapidKeys.publicKey });
 });
 
+app.get('/api/push/status', async (_req, res) => {
+  const localDb = readDb();
+  const localSubs = Array.isArray(localDb.pushSubscriptions) ? localDb.pushSubscriptions : [];
+  const durableSubs = await loadDurablePushSubscriptions(localSubs);
+  res.json({
+    success: true,
+    webPushReady: Boolean(vapidKeys.publicKey && vapidKeys.privateKey),
+    supabaseConnected: Boolean(pushSupabase),
+    activeSubscriptions: durableSubs.length,
+  });
+});
+
 app.post('/api/push/subscribe', async (req, res) => {
   const sub = req.body;
   if (!sub?.endpoint || !sub?.p256dh || !sub?.auth) {
