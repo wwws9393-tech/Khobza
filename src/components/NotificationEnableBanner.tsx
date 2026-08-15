@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Bell, CheckCircle2, Loader2, Volume2 } from 'lucide-react';
 import { playNotificationChimeSound, requestNotificationPermission } from '../services/notifications';
-import { registerFcmToken } from '../services/fcmService';
 import { registerPushSubscription } from '../services/pushService';
 
 interface Props {
@@ -32,11 +31,8 @@ export const NotificationEnableBanner: React.FC<Props> = ({
     setIsRegistering(true);
     setError('');
     try {
-      const [webPush, fcmToken] = await Promise.all([
-        registerPushSubscription(userPhone, role, vlanCode),
-        registerFcmToken(userPhone, role, vlanCode),
-      ]);
-      const ok = Boolean(webPush || fcmToken);
+      const webPush = await registerPushSubscription(userPhone, role, vlanCode);
+      const ok = Boolean(webPush);
       setIsRegistered(ok);
       if (!ok) setError('تعذر تسجيل هذا الجهاز. افتح التطبيق من الشاشة الرئيسية وحاول مرة أخرى.');
       return ok;
