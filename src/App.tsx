@@ -33,6 +33,7 @@ import { StaffLoginModal } from './components/StaffLoginModal';
 import { MandatoryUpdateModal } from './components/MandatoryUpdateModal';
 import { AndroidInstallModal } from './components/AndroidInstallModal';
 import { NotificationAlertModal } from './components/NotificationAlertModal';
+import { NotificationEnableBanner } from './components/NotificationEnableBanner';
 import { SplashScreen } from './components/SplashScreen';
 
 export default function App() {
@@ -281,6 +282,26 @@ export default function App() {
         />
 
         <main className="pb-12">
+          {role !== 'guest' && (
+            <NotificationEnableBanner
+              role={role === 'customer' ? 'family' : role}
+              roleText={role === 'customer' ? 'العائلة' : role === 'mandoub' ? 'المندوب' : 'الإدارة'}
+              userPhone={
+                role === 'customer'
+                  ? currentFamily?.phone
+                  : role === 'mandoub'
+                  ? currentMandoub?.phone || currentMandoub?.id
+                  : currentAdmin?.username || currentAdmin?.id
+              }
+              vlanCode={
+                role === 'customer'
+                  ? currentFamily?.vlanCode
+                  : role === 'mandoub'
+                  ? currentMandoub?.vlanCode
+                  : undefined
+              }
+            />
+          )}
           {role === 'guest' && (
             <CustomerVerificationView
               onVerified={handleCustomerVerified}
