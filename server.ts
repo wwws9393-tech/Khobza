@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 const app = express();
 const PORT = 3000;
@@ -960,6 +961,54 @@ app.post('/api/db/reset', (req, res) => {
 // Push Subscription storage in memory / DB
 import webpush from 'web-push';
 
+const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
+const supabaseServerKey =
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
+const pushSupabase: SupabaseClient | null =
+  supabaseUrl && supabaseServerKey
+    ? createClient(supabaseUrl, supabaseServerKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      })
+    : null;
+
+function toSupabasePushRecord(sub: any) {
+  return {
+    endpoint: sub.endpoint,
+    p256dh: sub.p256dh,
+    auth: sub.auth,
+    user_phone: sub.userPhone || sub.user_phone || null,
+    role: sub.role === 'customer' ? 'family' : (sub.role || 'family'),
+    vlan_code: sub.vlanCode || sub.vlan_code || null,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function fromSupabasePushRecord(sub: any) {
+  return {
+    endpoint: sub.endpoint,
+    p256dh: sub.p256dh,
+    auth: sub.auth,
+    userPhone: sub.user_phone,
+    role: sub.role,
+    vlanCode: sub.vlan_code,
+    updatedAt: sub.updated_at,
+  };
+}
+
+async function loadDurablePushSubscriptions(localFallback: any[]): Promise<any[]> {
+  if (!pushSupabase) return localFallback;
+  try {
+    const { data, error } = await pushSupabase
+      .from('push_subscriptions')
+      .select('endpoint,p256dh,auth,user_phone,role,vlan_code,updated_at');
+    if (error) throw error;
+    return Array.isArray(data) ? data.map(fromSupabasePushRecord) : localFallback;
+  } catch (error) {
+    console.warn('[Push Server] Supabase subscription read failed; using local fallback:', error);
+    return localFallback;
+  }
+}
+
 const initialDb = readDb();
 let vapidKeys = initialDb.vapidKeys || {
   publicKey: process.env.VAPID_PUBLIC_KEY || '',
@@ -1018,30 +1067,44 @@ app.get('/api/push/vapid-public-key', (req, res) => {
   res.json({ publicKey: vapidKeys.publicKey });
 });
 
-app.post('/api/push/subscribe', (req, res) => {
+app.post('/api/push/subscribe', async (req, res) => {
   const sub = req.body;
-  if (sub && sub.endpoint) {
-    const db = readDb();
-    let currentSubs = Array.isArray(db.pushSubscriptions) ? [...db.pushSubscriptions] : [];
-    currentSubs = currentSubs.filter((s) => s.endpoint !== sub.endpoint);
-    const newEntry = {
-      ...sub,
-      id: sub.endpoint,
-      role: sub.role === 'customer' ? 'family' : (sub.role || 'family'),
-      updatedAt: new Date().toISOString(),
-    };
-    currentSubs.push(newEntry);
-    pushSubscriptions = currentSubs;
-    db.pushSubscriptions = currentSubs;
-    db.updatedAt = new Date().toISOString();
-    try {
-      fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2), 'utf-8');
-      console.log(`[Push Server] Registered Web Push subscriber for ${newEntry.role} (${newEntry.userPhone || 'anon'}). Total active: ${currentSubs.length}`);
-    } catch (e) {
-      console.error('[Push Server] Failed saving push subscription:', e);
+  if (!sub?.endpoint || !sub?.p256dh || !sub?.auth) {
+    return res.status(400).json({ success: false, error: 'Invalid push subscription' });
+  }
+
+  const db = readDb();
+  let currentSubs = Array.isArray(db.pushSubscriptions) ? [...db.pushSubscriptions] : [];
+  currentSubs = currentSubs.filter((item) => item.endpoint !== sub.endpoint);
+  const newEntry = {
+    ...sub,
+    id: sub.endpoint,
+    role: sub.role === 'customer' ? 'family' : (sub.role || 'family'),
+    updatedAt: new Date().toISOString(),
+  };
+  currentSubs.push(newEntry);
+  pushSubscriptions = currentSubs;
+  db.pushSubscriptions = currentSubs;
+  db.updatedAt = new Date().toISOString();
+
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2), 'utf-8');
+  } catch (error) {
+    console.warn('[Push Server] Local subscription fallback write failed:', error);
+  }
+
+  if (pushSupabase) {
+    const { error } = await pushSupabase
+      .from('push_subscriptions')
+      .upsert(toSupabasePushRecord(newEntry), { onConflict: 'endpoint' });
+    if (error) {
+      console.error('[Push Server] Supabase subscription save failed:', error);
+      return res.status(503).json({ success: false, error: 'Could not persist push subscription' });
     }
   }
-  res.json({ success: true, count: pushSubscriptions.length });
+
+  console.log(`[Push Server] Registered subscriber for ${newEntry.role} (${newEntry.userPhone || 'anon'}).`);
+  return res.json({ success: true, count: currentSubs.length, durable: Boolean(pushSupabase) });
 });
 
 // Dedicated GET /api/orders endpoint for fast atomic fetching
@@ -1077,9 +1140,10 @@ async function dispatchServerPushNotification(options: {
 
   // 2. Refresh pushSubscriptions from storage
   const currentDb = readDb();
-  const allSubs: any[] = Array.isArray(currentDb.pushSubscriptions) && currentDb.pushSubscriptions.length > 0
+  const localSubs: any[] = Array.isArray(currentDb.pushSubscriptions) && currentDb.pushSubscriptions.length > 0
     ? currentDb.pushSubscriptions
     : pushSubscriptions;
+  const allSubs: any[] = await loadDurablePushSubscriptions(localSubs);
 
   // 3. Filter Web Push subscribers with robust role and phone matching
   const matchingSubs = allSubs.filter((sub) => {
@@ -1090,6 +1154,11 @@ async function dispatchServerPushNotification(options: {
       if (subRole && subRole !== tRole) {
         return false;
       }
+    }
+
+    // VLAN / delivery-area filter: a new order must only wake the responsible mandoub.
+    if (vlanCode && sub.vlanCode && !isServerVlanMatch(vlanCode, sub.vlanCode)) {
+      return false;
     }
 
     // Phone / Identifier filter
@@ -1159,6 +1228,9 @@ async function dispatchServerPushNotification(options: {
   if (deadEndpoints.length > 0) {
     pushSubscriptions = pushSubscriptions.filter((s) => !deadEndpoints.includes(s.endpoint));
     writeDb({ pushSubscriptions });
+    if (pushSupabase) {
+      await pushSupabase.from('push_subscriptions').delete().in('endpoint', deadEndpoints);
+    }
   }
 
   return { targetedCount: matchingSubs.length, activeSubscribers: pushSubscriptions.length };
